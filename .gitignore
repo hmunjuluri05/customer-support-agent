@@ -150,7 +150,14 @@ activemq-data/
 *.sage.py
 
 # Environments
-.env
+#
+# Deny by shape, not by filename. The original template listed `.env` alone,
+# which let .env.production, .env.bak and friends through -- and a secret only
+# has to be committed once. The committed templates are the sole exceptions,
+# and they hold placeholders.
+.env*
+!.env.example
+!.env.*.example
 .envrc
 .venv
 env/
@@ -228,7 +235,11 @@ infra/.terraform/
 *.tfstate
 *.tfstate.*
 *.tfplan
-terraform.tfvars
+# Every tfvars file, not just the default name: *.auto.tfvars is loaded
+# automatically by Terraform and is exactly where someone puts a password.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
 crash.log
 
 # ---------------------------------------------------------------- Node/Next --
