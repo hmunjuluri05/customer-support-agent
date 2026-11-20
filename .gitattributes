@@ -1,0 +1,13 @@
+# Line endings are normalised to LF in the repository.
+* text=auto eol=lf
+
+# These must be LF in the container image no matter what the checkout does.
+# A CRLF shebang line fails as `bad interpreter: /bin/sh^M`, which on Azure
+# surfaces as ActivationFailed with no application logs at all.
+*.sh text eol=lf
+entrypoint.sh text eol=lf
+Dockerfile text eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
