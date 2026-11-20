@@ -340,6 +340,97 @@ Teardown: `scripts/azure-teardown.ps1`, or `terraform destroy`.
 
 ---
 
+## CI/CD
+
+Two workflows in `.github/workflows`, and no stored credential anywhere in
+either of them.
+
+**`ci.yml`** — every pull request, and the gate in front of every release.
+
+| Job | What it runs |
+|---|---|
+| `static` | ruff, `ruff format --check`, mypy strict, `tsc --noEmit`, a full Next.js production build, `terraform fmt -check` + `validate` |
+| `test` | All 166 tests against a `pgvector/pgvector:pg17` service container, with migrations, corpus ingestion and fixture seeding run first |
+
+The production build is in the gate because `tsc --noEmit` does not catch a
+server/client boundary violation — one has already passed a clean typecheck
+and failed only at build time.
+
+The test job authenticates to Azure OpenAI and embeds the real corpus, because
+a zero-vector fake cannot produce a GROUNDED decision and the grounding gate is
+what most of those tests are about. That costs a few cents per run and is the
+difference between testing the system and testing a mock of it.
+
+**`deploy.yml`** — push to `main`. Calls `ci.yml` first, then builds both
+images inside ACR, resolves their digests, rolls both Container Apps forward
+**by digest rather than by tag**, waits for each revision to report `Healthy`,
+and finally runs `scripts/smoke.py` against the public URL. That last step
+drives a real turn through the proxy, the internal API, the database,
+retrieval and the model — a revision that starts but cannot answer a question
+has not deployed. The run summary records both digests and the demo link.
+
+### No secrets, by construction
+
+Authentication is OIDC federation (`infra/cicd.tf`). GitHub mints a
+short-lived token naming this repository and this branch; Entra exchanges it
+for an Azure token only if the subject matches a federated credential. There
+is no service principal password to rotate, and the repository variables hold
+client ids — which identify an identity rather than authenticate as one.
+
+Two identities, because the two jobs need unrelated powers:
+
+| Identity | Can | Cannot |
+|---|---|---|
+| `id-gha-ci-*` | Call Azure OpenAI for inference | Deploy, push images, read the database |
+| `id-gha-deploy-*` | Push images, run an ACR build, update those two Container Apps | Call the model, touch the database or the registry's lifecycle |
+
+A compromised deploy job cannot spend model quota; a pull request from a fork
+runs under the CI subject and can never reach the deploy identity, because
+that credential is scoped to `refs/heads/main`.
+
+`az acr build` schedules a build task inside the registry, which `AcrPush`
+does not cover. The usual answer is to grant Contributor on the registry,
+which also hands over deleting repositories and rotating admin credentials.
+Instead there is a three-action custom role (`ACR Build Runner`) with exactly
+`scheduleRun`, `runs/read` and `listLogSasUrl`.
+
+Third-party actions are pinned to commit SHAs. A tag is mutable, and these
+workflows hold a token that can reach Azure.
+
+### Wiring it up
+
+```bash
+cd infra
+# terraform.tfvars
+#   github_repository = "<owner>/<repo>"
+terraform apply
+
+# One command, needs the GitHub CLI and `gh auth login`:
+../scripts/set-github-variables.ps1 -Repository <owner>/<repo>
+```
+
+That sets ten repository **variables** (not secrets): the two client ids, the
+tenant and subscription, the resource group, registry and app names, the Azure
+OpenAI endpoint and the demo URL. Leave `github_repository` unset and no
+identity is created at all, so anyone can `terraform apply` this root and get
+the running application without being asked for a GitHub account.
+
+To put a human in front of releases, add an `environment:` to the deploy job
+and configure required reviewers on it in repository settings. It is left off
+by default only so the first pipeline run cannot fail on a missing
+environment.
+
+Manual deploys still work and are still the fastest way to ship a hotfix:
+
+```bash
+TAG=$(date +%Y%m%d-%H%M%S)
+az acr build --registry <acr> --image api:$TAG --file apps/api/Dockerfile .
+az containerapp update -n <api-app> -g <rg> --image <acr>.azurecr.io/api:$TAG
+python scripts/smoke.py https://<demo-host>
+```
+
+---
+
 ## Trade-offs
 
 **No Kubernetes.** AKS would mean a control plane to patch, an ingress
@@ -449,7 +540,11 @@ apps/web/          Next.js 15 App Router UI
 apps/smoke/        throwaway ingress probe from day one (kept: it is why
                    `transport = "http"` is pinned)
 fixtures/          synthetic accounts, policy corpus, labelled eval queries
-infra/             Terraform root — every Azure resource
+.github/workflows/ ci.yml (lint, types, build, full test suite) and
+                   deploy.yml (build, roll out by digest, smoke test)
+infra/             Terraform root — every Azure resource, including the
+                   OIDC identities GitHub Actions federates into
+scripts/           smoke.py, the GitHub variable setter, Azure teardown
 docs/build-plan.md the working plan, and a record of what each block turned up
 ```
 

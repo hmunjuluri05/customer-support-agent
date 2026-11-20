@@ -128,7 +128,11 @@ precision signal only.
 - ~~A1 — Fallback if realtime quota is refused~~ — **not needed.** Realtime quota
   granted and verified. Retained only as a contingency if capacity is withdrawn.
 - A2 — Terraform state is local initially, with a commented `backend "azurerm"` block.
-- A3 — CI runs lint/typecheck/test only. Deployment stays manual via `az`.
+- ~~A3 — CI runs lint/typecheck/test only. Deployment stays manual via `az`.~~
+  **Superseded.** Neither half was built during blocks 0–8; there was no
+  `.github/` directory at all, which made the manual `az` loop the only
+  deploy path rather than a deliberate choice. Block 9 builds both: CI
+  including the full suite, and auto-deploy on `main` by image digest.
 - A4 — Simulated action is a mock refund, plus a structured escalation ticket as the
   low-confidence terminal state. No account-field updates.
 
@@ -477,6 +481,7 @@ Dependencies in brackets. Blocks 1–2 can run while Block 0 is being verified.
 | 6 | Observability drawer, metrics, cost [4] | **DONE** — 133 tests green; per-turn drawer (waterfall on the turn clock, similarity against τ and the weak band, tokens, cost labelled an estimate, redacted tool rows) plus a session rollup with latency split by mode. Voice turns are traceable too: their metric row is derived from the audit rows. Using it found three real defects — a clock mixed between the database and the app, a one-in-four citation refusal on the headline policy question, and a turn labelled "Escalated" with no ticket. Warm p50 time-to-first-status **473 ms**, turn total **3.16 s**. See §14c |
 | 7 | Fault injection, rate limits, error states, reconnect [4,5] | **DONE** — 165 tests green; all five failure rows verified on the deployment and in the browser. Provider errors are classified at the adapter and retried within the turn deadline; a refund that commits and then loses its confirmation is reconciled from the receipt row inside the same turn. Found a demo control that did nothing on chat, two unimplemented fault kinds, and a payload field the browser never heard about. See §14d |
 | 8 | Deploy final, README, rehearse, record | **README, demo script and rehearsal DONE** — all six demo scenarios run against the deployment and recorded in §15; calibration re-run to confirm the published numbers; `.gitignore` completed for Node/Next/IDE. Outstanding and owner-only: the commit, a clean-browser pass with a working microphone, and the recording |
+| 9 | CI/CD: pull-request gate and auto-deploy on main | **DONE** — two workflows, no stored credential. `ci.yml` runs lint, mypy strict, tsc, a Next.js production build, terraform validate, and all 166 tests against a pgvector service container with Azure OpenAI over OIDC. `deploy.yml` gates on that, builds both images in ACR, rolls out **by digest**, waits for Healthy, and smoke-tests the public URL. Identities, federated credentials and a three-action custom ACR role are in `infra/cicd.tf`. See §14e |
 
 ---
 
@@ -1104,6 +1109,110 @@ a committed receipt.
 
 ---
 
+---
+
+## 14e. What Block 9 turned up
+
+### The pipeline that was assumed rather than built
+
+Assumption A3 said "CI runs lint/typecheck/test only; deployment stays manual
+via `az`". Half of that read like a decision and neither half existed: there
+was no `.github/` directory in the repository at all. Every deploy through
+eight blocks was me typing `az acr build` and `az containerapp update`, which
+worked precisely because one person was doing it carefully each time.
+
+That is worth naming because it is the failure mode the rest of this project
+is built against: a property nobody enforces is a property you do not have.
+The guards are in the executor rather than the prompt for the same reason.
+
+### Granting exactly what `az acr build` needs
+
+`az acr build` does not push an image — it uploads a context and schedules a
+build *task inside the registry*. `AcrPush` does not cover that, and the
+answer in most documentation is to grant `Contributor` on the registry, which
+also carries deleting repositories and rotating the admin credential.
+
+Three actions are what the command actually uses:
+
+```
+Microsoft.ContainerRegistry/registries/scheduleRun/action
+Microsoft.ContainerRegistry/registries/runs/read
+Microsoft.ContainerRegistry/registries/runs/listLogSasUrl/action
+```
+
+So there is a custom role definition with exactly those, scoped to the one
+registry, assigned alongside `AcrPush`. Verified after apply:
+
+```
+AcrPush                               .../registries/acrsupportagenthk
+ACR Build Runner (supportagent-hk)    .../registries/acrsupportagenthk
+Contributor                           .../containerApps/ca-api-supportagent-hk
+Contributor                           .../containerApps/ca-web-supportagent-hk
+Managed Identity Operator             .../userAssignedIdentities/id-supportagent-hk
+```
+
+That last one is easy to miss. A revision runs *as* the application identity,
+so the deploy principal must be allowed to assign it; without it,
+`az containerapp update` fails with a `LinkedAuthorizationFailed` that names
+neither identity clearly.
+
+The CI identity is deliberately a different principal holding one role —
+`Cognitive Services OpenAI User` on the model account — so a compromised
+deploy job cannot spend model quota, and a pull request from a fork, which
+runs under the CI subject, can never reach the identity that pushes images.
+
+### Two bounds on trust, again
+
+The pattern that keeps recurring in this project shows up here too. The
+federated credential is bound to a repository *and* a ref: `pull_request` for
+CI, `refs/heads/main` for deploy. Neither is a secret that leaks usefully —
+a client id identifies an identity, it does not authenticate as one — and the
+only thing that decides whether a token is issued is the subject line GitHub
+signed.
+
+Third-party actions are pinned to commit SHAs rather than tags, for the same
+reason the chunk ids never reach the model: a mutable identifier in a trusted
+position is an unforced risk. `v4` can be moved by whoever owns the action
+repository, and these workflows hold a token that reaches Azure.
+
+### Deploy by digest
+
+Tags are mutable too. The workflow builds `api:<sha>` and `web:<sha>`, then
+resolves each to its digest and updates the Container Apps with
+`registry/image@sha256:…`. The revision history then names the exact bytes
+that passed CI, which is the question anyone actually asks when looking at a
+revision six months later.
+
+### A smoke test that drives the product
+
+`scripts/smoke.py` runs after the rollout, against the public URL: it loads
+the UI, reads the demo catalogue through the Next.js proxy, creates a session,
+and streams a real turn, asserting that tools ran, retrieval decided, and
+exactly one terminal event arrived. A revision that starts but cannot answer a
+question has not deployed, and a health endpoint would not have noticed.
+
+It asks a policy question rather than requesting a refund, so a deploy check
+never moves money or leaves the fixtures dirty — a smoke test that needs a
+cleanup step is one failed cleanup away from a confusing demo. Verified
+against the live deployment before being wired in: nine checks, 3.9 s.
+
+### What is verified and what is not
+
+The Terraform is applied and the role assignments are confirmed by `az role
+assignment list`. The `az` commands the workflow runs were each executed
+against the real resources first — including the two new ones, `az acr
+repository show --query digest` and the `healthState` JMESPath, which return
+exactly the shapes the workflow consumes. Both YAML files parse, and every
+local command in them (`ruff`, `mypy`, `tsc`, `npm run build`, `terraform
+validate`, `pytest`) is one that already runs clean here.
+
+**The workflows themselves have never executed**, because that needs a push.
+The parts that can only be proven by running are the OIDC handshake, the
+pgvector service container, and `uv` on a hosted runner. If the first run
+fails it will be in one of those three places.
+
+---
+
 ## 15. Demo script
 
 Moved to **[docs/demo-script.md](demo-script.md)** and rehearsed against the
@@ -1132,9 +1241,13 @@ escalates truthfully.
 - [x] README — startup, architecture, chunking choices, τ calibration numbers, error recovery, demo scenarios, measured latency, **trade-offs including why not AKS/Redis/multi-replica**
 - [x] Demo rehearsed against the deployment — every scenario in §15 run end to end
 - [x] Live HTTPS URL serving the current build, fixtures reset
-- [ ] **Commit and push.** Everything is still untracked on `main`; `.gitignore`
-      now covers `node_modules/`, `.next/`, `.idea/` and `docs/email.md`, so the
-      tree is 115 files of source, fixtures, infra and docs
+- [x] Committed — 11 layered commits on `main`
+- [x] CI/CD — `ci.yml` gate and `deploy.yml` auto-deploy, OIDC identities applied
+- [ ] **Set the ten repository variables**, then push:
+      `./scripts/set-github-variables.ps1 -Repository <owner>/<repo>` (needs `gh`)
+- [ ] **Push to `main`** and watch the first pipeline run. The parts that can
+      only be proven by running are the OIDC handshake, the pgvector service
+      container, and `uv` on a hosted runner
 - [ ] Verify from a clean browser with a working microphone (the one path I
       could not exercise — see README "Known limitations")
 - [ ] Loom 3–5 min, screen + webcam — script in [docs/demo-script.md](demo-script.md)

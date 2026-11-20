@@ -1,0 +1,154 @@
+name: CI
+
+# Runs on every pull request, and is called by deploy.yml before a release so
+# nothing reaches the deployment that has not passed the same gate.
+#
+# Third-party actions are pinned to commit SHAs, not tags. A tag is mutable:
+# whoever controls the action repository can move `v4` to new code, and this
+# workflow holds a token that can call Azure OpenAI.
+on:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
+
+jobs:
+  static:
+    name: Lint, types and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: apps/api/uv.lock
+
+      - name: Install API dependencies
+        working-directory: apps/api
+        run: uv sync --locked
+
+      - name: ruff
+        working-directory: apps/api
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: mypy (strict)
+        working-directory: apps/api
+        run: uv run mypy support
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install web dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: TypeScript
+        working-directory: apps/web
+        run: npm run typecheck
+
+      # The production build is part of the gate because `tsc --noEmit` does
+      # not catch a server/client boundary violation. One has already slipped
+      # through a passing typecheck and failed only at build time.
+      - name: Next.js production build
+        working-directory: apps/web
+        run: npm run build
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform format and validate
+        working-directory: infra
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+
+    # Real Postgres with pgvector, because the properties under test are row
+    # locks, unique constraints under concurrency and cosine neighbourhoods.
+    # None of them exist in sqlite, and all of them would be vacuously green.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17@sha256:b513c48566e4777cd3370451400000c78eda6a08131d68f4c31d4a76f27bd8fd
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: support_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/support_agent
+      AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+      AZURE_OPENAI_CHAT_DEPLOYMENT: gpt-chat
+      AZURE_OPENAI_EMBEDDING_DEPLOYMENT: text-embedding-3-small
+      AZURE_OPENAI_REALTIME_DEPLOYMENT: gpt-realtime-mini
+      DEMO_MODE: "true"
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: apps/api/uv.lock
+
+      - name: Install API dependencies
+        working-directory: apps/api
+        run: uv sync --locked
+
+      # Federated OIDC: no secret is stored anywhere. Entra exchanges a token
+      # GitHub minted for this repository, and this identity holds data-plane
+      # inference access and nothing else.
+      #
+      # The Python code reaches the same account through DefaultAzureCredential,
+      # which falls through to the Azure CLI credential this step establishes.
+      # AZURE_CLIENT_ID is deliberately NOT exported into the job environment:
+      # the application reads it as "use this managed identity", which does not
+      # exist on a hosted runner.
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_CI }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Migrate
+        working-directory: apps/api
+        run: uv run alembic upgrade head
+
+      - name: Ingest the policy corpus
+        working-directory: apps/api
+        run: uv run python -m support.retrieval.ingest
+
+      - name: Seed fixtures
+        working-directory: apps/api
+        run: uv run python -m support.fixtures.seed
+
+      - name: pytest
+        working-directory: apps/api
+        run: uv run pytest -q

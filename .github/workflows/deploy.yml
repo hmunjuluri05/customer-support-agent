@@ -1,0 +1,158 @@
+name: Deploy
+
+# Push to main: run the full CI gate, build both images in ACR, roll the two
+# Container Apps forward by digest, and prove the result works through the
+# public URL. A failure at the smoke step leaves the new revision in place and
+# fails loudly rather than guessing at a rollback — the previous revision is
+# one `az containerapp update` away and the drawer says what happened.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+# Serialised per environment, and never cancelled mid-apply: interrupting a
+# rollout is how you get a half-deployed pair of services.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      id-token: write
+
+  deploy:
+    name: Build and roll out
+    needs: gate
+    runs-on: ubuntu-latest
+    # No `environment:` on purpose. Adding one is how you put a human approval
+    # in front of a release, and it is the right move for a production system —
+    # but it must be created in repository settings first, and a demo whose
+    # very first pipeline run fails on a missing environment is a bad trade.
+    # See the README for the one setting to change.
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The deploy identity can push images and update these two apps. It has
+      # no inference access, so a compromised deploy job cannot spend model
+      # quota, and no database access.
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Tag from the commit
+        id: tag
+        run: echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      # Built in the registry, not on the runner: no Docker layer cache to
+      # warm, no buildx setup, and the image never crosses the public internet
+      # twice. The API image is built from the repository root because it bakes
+      # /fixtures in, so a cold container can migrate, ingest and seed itself.
+      - name: Build API image
+        run: |
+          az acr build \
+            --registry "${{ vars.ACR_NAME }}" \
+            --image "api:${{ steps.tag.outputs.tag }}" \
+            --file apps/api/Dockerfile \
+            .
+
+      - name: Build web image
+        run: |
+          az acr build \
+            --registry "${{ vars.ACR_NAME }}" \
+            --image "web:${{ steps.tag.outputs.tag }}" \
+            --file apps/web/Dockerfile \
+            apps/web
+
+      # Deploy by digest, not by tag. A tag can be moved; a digest names the
+      # bytes that passed CI, and it is what the revision history will show
+      # six months from now.
+      - name: Resolve digests
+        id: digests
+        run: |
+          set -euo pipefail
+          api=$(az acr repository show \
+            --name "${{ vars.ACR_NAME }}" \
+            --image "api:${{ steps.tag.outputs.tag }}" \
+            --query digest -o tsv)
+          web=$(az acr repository show \
+            --name "${{ vars.ACR_NAME }}" \
+            --image "web:${{ steps.tag.outputs.tag }}" \
+            --query digest -o tsv)
+          echo "api=${{ vars.ACR_NAME }}.azurecr.io/api@${api}" >> "$GITHUB_OUTPUT"
+          echo "web=${{ vars.ACR_NAME }}.azurecr.io/web@${web}" >> "$GITHUB_OUTPUT"
+
+      # The API first. It owns the migrations, which its entrypoint applies
+      # idempotently on start, and the schema changes in this project have all
+      # been additive — a web revision talking to a slightly older API is a
+      # survivable few seconds, the reverse is not.
+      - name: Roll out the API
+        run: |
+          az containerapp update \
+            --name "${{ vars.API_APP_NAME }}" \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --image "${{ steps.digests.outputs.api }}" \
+            --output none
+
+      - name: Roll out the web app
+        run: |
+          az containerapp update \
+            --name "${{ vars.WEB_APP_NAME }}" \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --image "${{ steps.digests.outputs.web }}" \
+            --output none
+
+      - name: Wait for both revisions to report healthy
+        run: |
+          set -euo pipefail
+          for app in "${{ vars.API_APP_NAME }}" "${{ vars.WEB_APP_NAME }}"; do
+            echo "waiting for $app"
+            for attempt in $(seq 1 40); do
+              state=$(az containerapp revision list \
+                --name "$app" \
+                --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+                --query "sort_by([?properties.active], &properties.createdTime)[-1].properties.healthState" \
+                -o tsv)
+              echo "  attempt $attempt: $state"
+              if [ "$state" = "Healthy" ]; then
+                break
+              fi
+              if [ "$attempt" = "40" ]; then
+                echo "::error::$app did not reach Healthy"
+                az containerapp revision list --name "$app" \
+                  --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" -o table
+                exit 1
+              fi
+              sleep 10
+            done
+          done
+
+      # Through the public URL, end to end: the proxy, the internal API, the
+      # database, retrieval and the model. A revision that starts but cannot
+      # answer a question has not deployed.
+      - name: Smoke test the deployment
+        run: python scripts/smoke.py "${{ vars.DEMO_URL }}"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Deployed \`${{ steps.tag.outputs.tag }}\`"
+            echo ""
+            echo "| image | digest |"
+            echo "|---|---|"
+            echo "| api | \`${{ steps.digests.outputs.api }}\` |"
+            echo "| web | \`${{ steps.digests.outputs.web }}\` |"
+            echo ""
+            echo "[${{ vars.DEMO_URL }}](${{ vars.DEMO_URL }})"
+          } >> "$GITHUB_STEP_SUMMARY"

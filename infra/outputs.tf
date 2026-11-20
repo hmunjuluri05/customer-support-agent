@@ -42,3 +42,25 @@ output "managed_identity_client_id" {
   description = "Client ID of the identity used for ACR pull and Azure OpenAI access."
   value       = azurerm_user_assigned_identity.app.client_id
 }
+
+# ------------------------------------------------------------------ CI/CD --
+#
+# These are repository *variables*, not secrets: a client id identifies an
+# identity, it does not authenticate as one. Only a workflow run whose OIDC
+# subject matches the federated credential can exchange it for a token.
+
+output "github_actions_variables" {
+  description = "Set these as GitHub Actions repository variables. Empty unless github_repository is set."
+  value = local.gha_enabled ? {
+    AZURE_CLIENT_ID_CI     = azurerm_user_assigned_identity.gha_ci[0].client_id
+    AZURE_CLIENT_ID_DEPLOY = azurerm_user_assigned_identity.gha_deploy[0].client_id
+    AZURE_TENANT_ID        = data.azurerm_client_config.current.tenant_id
+    AZURE_SUBSCRIPTION_ID  = var.subscription_id
+    AZURE_RESOURCE_GROUP   = azurerm_resource_group.main.name
+    ACR_NAME               = azurerm_container_registry.main.name
+    API_APP_NAME           = azurerm_container_app.api.name
+    WEB_APP_NAME           = azurerm_container_app.web.name
+    AZURE_OPENAI_ENDPOINT  = "https://${azurerm_cognitive_account.ai.custom_subdomain_name}.openai.azure.com/"
+    DEMO_URL               = "https://${azurerm_container_app.web.ingress[0].fqdn}"
+  } : {}
+}

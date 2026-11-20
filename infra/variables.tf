@@ -180,3 +180,23 @@ variable "dev_client_ip" {
   type        = string
   default     = ""
 }
+
+variable "github_repository" {
+  description = <<-EOT
+    "owner/repo" of the GitHub repository allowed to authenticate to this
+    subscription over OIDC. Leave unset and no CI/CD identities are created,
+    so this root still applies cleanly for anyone who just wants the running
+    application.
+
+    This string is the whole access-control decision: Entra will only exchange
+    a token whose subject names this repository.
+  EOT
+  type        = string
+  default     = null
+}
+
+variable "github_default_branch" {
+  description = "Branch whose pushes are allowed to deploy."
+  type        = string
+  default     = "main"
+}
