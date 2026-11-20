@@ -371,6 +371,24 @@ has not deployed. The run summary records both digests and the demo link.
 
 ### No secrets, by construction
 
+```bash
+python scripts/audit-secrets.py     # exit 0 = nothing sensitive in any commit
+```
+
+That script reads the real values out of the files git is told to ignore —
+`.env`, `terraform.tfvars`, the Terraform state — and searches **every blob in
+every commit** for each one, because a secret committed once and deleted later
+is still published. It prints labels and lengths, never values. The database
+password, the Azure OpenAI access keys, the full connection URL and the
+subscription id appear in no commit.
+
+The ignore rules deny by shape rather than by filename (`.env*`, `*.tfvars`)
+with the placeholder templates as the only exceptions. The earlier
+filename-by-filename list would have let `.env.production`, `.env.bak`,
+`prod.tfvars` and — worst — `secrets.auto.tfvars`, which Terraform loads
+automatically, straight into a commit.
+
+
 Authentication is OIDC federation (`infra/cicd.tf`). GitHub mints a
 short-lived token naming this repository and this branch; Entra exchanges it
 for an Azure token only if the subject matches a federated credential. There
@@ -544,7 +562,8 @@ fixtures/          synthetic accounts, policy corpus, labelled eval queries
                    deploy.yml (build, roll out by digest, smoke test)
 infra/             Terraform root — every Azure resource, including the
                    OIDC identities GitHub Actions federates into
-scripts/           smoke.py, the GitHub variable setter, Azure teardown
+scripts/           smoke.py, audit-secrets.py, the GitHub variable setter,
+                   Azure teardown
 docs/build-plan.md the working plan, and a record of what each block turned up
 ```
 
