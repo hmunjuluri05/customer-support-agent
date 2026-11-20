@@ -1,0 +1,65 @@
+{
+  "_comment": "Synthetic demo fixtures. No real customers, invoices or payments. Amounts are integer minor units (US cents). Designed so one request -- a $15.00 refund on a $40.00 invoice -- produces a different, correctly-cited outcome on each account.",
+  "accounts": [
+    {
+      "slug": "premium-active",
+      "label": "DEMO - Premium, active contract",
+      "customer_name": "Avery Chen",
+      "tier": "premium",
+      "contract_status": "active",
+      "expected_demo_outcome": "A $15.00 refund succeeds: under the $25.00 Premium cap, contract active.",
+      "invoices": [
+        {
+          "external_ref": "INV-1001",
+          "description": "Premium plan - October 2026",
+          "amount_minor": 4000,
+          "currency": "USD"
+        },
+        {
+          "external_ref": "INV-1002",
+          "description": "Premium plan - September 2026 (partially refunded)",
+          "amount_minor": 4000,
+          "refunded_minor": 3800,
+          "currency": "USD"
+        }
+      ]
+    },
+    {
+      "slug": "basic-active",
+      "label": "DEMO - Basic, active contract",
+      "customer_name": "Jordan Patel",
+      "tier": "basic",
+      "contract_status": "active",
+      "expected_demo_outcome": "The same $15.00 refund is denied: exceeds the $10.00 Basic cap. Proves tier-scoped retrieval.",
+      "invoices": [
+        {
+          "external_ref": "INV-2001",
+          "description": "Basic plan - October 2026",
+          "amount_minor": 4000,
+          "currency": "USD"
+        }
+      ]
+    },
+    {
+      "slug": "premium-inactive",
+      "label": "DEMO - Premium, inactive contract",
+      "customer_name": "Riley Morgan",
+      "tier": "premium",
+      "contract_status": "inactive",
+      "expected_demo_outcome": "Denied on contract eligibility even though the amount is within the Premium cap.",
+      "invoices": [
+        {
+          "external_ref": "INV-3001",
+          "description": "Premium plan - August 2026",
+          "amount_minor": 4000,
+          "currency": "USD"
+        }
+      ]
+    }
+  ],
+  "guard_probes": {
+    "_comment": "Cross-account references used by the guard tests. Requesting a refund on an invoice belonging to another account must fail with invoice_not_owned, regardless of what the model asks for.",
+    "foreign_invoice_for_premium_active": "INV-2001",
+    "exhausted_invoice": "INV-1002"
+  }
+}

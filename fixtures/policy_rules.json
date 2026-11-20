@@ -1,0 +1,60 @@
+{
+  "_comment": "Structured, versioned policy rules keyed by (doc_key, version, tier, action). The action service enforces THESE values; the Markdown corpus is what the customer is shown. tests/test_policy_consistency.py asserts the two agree, so a cap can never be changed in prose without changing enforcement, or vice versa. Amounts are integer minor units (US cents).",
+  "rules": [
+    {
+      "doc_key": "refund-policy-premium",
+      "version": "2.0",
+      "tier": "premium",
+      "action": "refund",
+      "per_request_cap_minor": 2500,
+      "currency": "USD",
+      "requires_active_contract": true,
+      "time_limit_days": 60,
+      "time_limit_exceptions": ["duplicate_charge", "internal_billing_error"],
+      "eligible_reasons": [
+        "billing_error",
+        "duplicate_charge",
+        "service_outage",
+        "goodwill"
+      ],
+      "_text_assertions": {
+        "cap_phrase": "$25.00 USD per request",
+        "time_limit_phrase": "60 days"
+      }
+    },
+    {
+      "doc_key": "refund-policy-basic",
+      "version": "2.0",
+      "tier": "basic",
+      "action": "refund",
+      "per_request_cap_minor": 1000,
+      "currency": "USD",
+      "requires_active_contract": true,
+      "time_limit_days": 30,
+      "time_limit_exceptions": ["duplicate_charge"],
+      "eligible_reasons": ["billing_error", "duplicate_charge"],
+      "_text_assertions": {
+        "cap_phrase": "$10.00 USD per request",
+        "time_limit_phrase": "30 days"
+      }
+    },
+    {
+      "doc_key": "refund-policy-premium",
+      "version": "1.0",
+      "tier": "premium",
+      "action": "refund",
+      "active": false,
+      "per_request_cap_minor": 5000,
+      "currency": "USD",
+      "requires_active_contract": true,
+      "time_limit_days": 90,
+      "time_limit_exceptions": [],
+      "eligible_reasons": ["agent_discretion"],
+      "_comment": "Superseded. Retained so receipts issued under it stay auditable, and as a regression canary: if a $40.00 refund is ever approved for Premium, the active-version filter has broken.",
+      "_text_assertions": {
+        "cap_phrase": "$50.00 USD per request",
+        "time_limit_phrase": "90 days"
+      }
+    }
+  ]
+}
