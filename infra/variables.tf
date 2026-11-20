@@ -200,3 +200,26 @@ variable "github_default_branch" {
   type        = string
   default     = "main"
 }
+
+variable "github_owner_id" {
+  description = <<-EOT
+    Numeric GitHub account id of the repository owner.
+
+    GitHub now issues OIDC subjects carrying immutable numeric identifiers --
+    `repo:owner@1234/repo@5678:ref:refs/heads/main` rather than
+    `repo:owner/repo:ref:refs/heads/main` -- so a federated credential written
+    the classic way no longer matches and Entra refuses the exchange with
+    AADSTS700213. Both forms are registered when these are set.
+
+    Find them with:
+      gh api repos/OWNER/REPO --jq '{repo: .id, owner: .owner.id}'
+  EOT
+  type        = number
+  default     = null
+}
+
+variable "github_repository_id" {
+  description = "Numeric GitHub id of the repository itself. See github_owner_id."
+  type        = number
+  default     = null
+}

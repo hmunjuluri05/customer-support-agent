@@ -24,6 +24,24 @@ locals {
   # GitHub's OIDC issuer and the audience Entra expects back.
   gha_issuer   = "https://token.actions.githubusercontent.com"
   gha_audience = ["api://AzureADTokenExchange"]
+
+  # Two subject formats, because GitHub changed the one it sends.
+  #
+  # The classic subject is `repo:owner/repo:ref:refs/heads/main`. GitHub now
+  # issues immutable identifiers instead -- `repo:owner@162727727/repo@1464260326:
+  # ref:refs/heads/main` -- and a credential written the classic way simply
+  # does not match: Entra refuses with AADSTS700213 and the workflow fails at
+  # `azure/login` with nothing wrong on the Azure side.
+  #
+  # Registering both costs nothing (an identity allows 20 credentials) and
+  # means neither a rollout nor a rollback of that GitHub change breaks the
+  # pipeline. The immutable pair is created only when the ids are supplied.
+  gha_owner = split("/", coalesce(var.github_repository, "/"))[0]
+  gha_repo  = split("/", coalesce(var.github_repository, "/"))[1]
+
+  gha_immutable       = local.gha_enabled && var.github_owner_id != null && var.github_repository_id != null
+  gha_immutable_count = local.gha_immutable ? 1 : 0
+  gha_immutable_repo  = "${local.gha_owner}@${var.github_owner_id}/${local.gha_repo}@${var.github_repository_id}"
 }
 
 # ------------------------------------------------------------------- CI --
@@ -152,4 +170,36 @@ resource "azurerm_role_assignment" "gha_deploy_app_identity" {
   scope                = azurerm_user_assigned_identity.app.id
   role_definition_name = "Managed Identity Operator"
   principal_id         = azurerm_user_assigned_identity.gha_deploy[0].principal_id
+}
+
+# ------------------------------------------- immutable-identifier subjects --
+#
+# Same three credentials as above, in the subject format GitHub actually
+# presents today. See the note in `locals` for why both exist.
+
+resource "azurerm_federated_identity_credential" "gha_ci_pr_immutable" {
+  count     = local.gha_immutable_count
+  name      = "github-pull-request-immutable"
+  parent_id = azurerm_user_assigned_identity.gha_ci[0].id
+  issuer    = local.gha_issuer
+  audience  = local.gha_audience
+  subject   = "repo:${local.gha_immutable_repo}:pull_request"
+}
+
+resource "azurerm_federated_identity_credential" "gha_ci_main_immutable" {
+  count     = local.gha_immutable_count
+  name      = "github-main-immutable"
+  parent_id = azurerm_user_assigned_identity.gha_ci[0].id
+  issuer    = local.gha_issuer
+  audience  = local.gha_audience
+  subject   = "repo:${local.gha_immutable_repo}:ref:refs/heads/${var.github_default_branch}"
+}
+
+resource "azurerm_federated_identity_credential" "gha_deploy_main_immutable" {
+  count     = local.gha_immutable_count
+  name      = "github-main-immutable"
+  parent_id = azurerm_user_assigned_identity.gha_deploy[0].id
+  issuer    = local.gha_issuer
+  audience  = local.gha_audience
+  subject   = "repo:${local.gha_immutable_repo}:ref:refs/heads/${var.github_default_branch}"
 }

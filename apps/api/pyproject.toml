@@ -67,6 +67,21 @@ plugins = ["pydantic.mypy"]
 module = ["pgvector.*"]
 ignore_missing_imports = true
 
+# The one module whose whole purpose is platform-conditional code.
+#
+# mypy narrows `sys.platform` to the host it runs on, so the Windows-only
+# branch is genuinely unreachable when checking on Linux -- and the early
+# return is unreachable when checking on Windows. Whichever platform you pin,
+# `warn_unreachable` flags the other half, so unreachability here is the
+# expected state rather than a defect. Caught only in CI, because a developer
+# on Windows never sees it.
+#
+# The cost is that the Windows branch is not type-checked on Linux. It is
+# checked on a Windows machine, which is the only place it runs.
+[[tool.mypy.overrides]]
+module = ["support.platform_compat"]
+warn_unreachable = false
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
