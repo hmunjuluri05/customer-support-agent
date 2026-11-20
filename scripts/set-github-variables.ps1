@@ -20,7 +20,10 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $Repository,
 
-    [string] $InfraPath = (Join-Path $PSScriptRoot '..' 'infra')
+    # Nested rather than Join-Path with three parts: the multi-argument form
+    # is PowerShell 7+, and Windows PowerShell 5.1 is still the default shell
+    # on a stock Windows box.
+    [string] $InfraPath = (Join-Path (Join-Path $PSScriptRoot '..') 'infra')
 )
 
 $ErrorActionPreference = 'Stop'
