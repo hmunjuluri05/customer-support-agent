@@ -15,6 +15,7 @@ import {
   fetchSessionMetrics,
   fetchSnapshot,
   fetchTrace,
+  resumeSession,
   injectFault,
   loadCredentials,
   newClientTurnId,
@@ -195,6 +196,10 @@ export function ChatApp() {
     setAccountsError(null);
     const credentials: Credentials = { sessionId: session.session_id, token: null };
     try {
+      // Switch the cookie to this session first. Listing is browser-scoped,
+      // but authorisation is one cookie naming one session, so reading an
+      // older session before switching is a 404.
+      await resumeSession(session.session_id);
       const snapshot = await fetchSnapshot(credentials);
       saveCredentials(credentials);
       setCredentials(credentials);

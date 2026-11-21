@@ -302,6 +302,99 @@ async def get_current_sessions(
     return JSONResponse({"sessions": out})
 
 
+@router.post("/sessions/{session_id}/resume")
+async def resume_session(
+    session_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(settings_dep),
+    browser_id: str | None = Cookie(default=None, alias=BROWSER_COOKIE),
+) -> JSONResponse:
+    """Point this browser's session cookie at one of its earlier sessions.
+
+    Listing resumable sessions is browser-scoped, but authorisation is not:
+    the session cookie names exactly one session, so asking for any other --
+    the Jordan Patel session while the cookie names the newer Avery Chen one
+    -- was refused with "Session not found". Correct refusal, wrong question.
+
+    Resuming therefore switches the cookie rather than widening what the
+    cookie means. Authorisation stays one credential naming one session, and
+    `authorise_session` is untouched.
+
+    The cookie has to be re-issued because only token *hashes* are stored:
+    there is no way to hand back a token the server cannot read. So the
+    session's token is rotated here, which also invalidates the old one -- a
+    deliberate consequence, since a session can be active in one place at a
+    time from this UI's point of view.
+
+    Ownership is the browser cookie, never the account: the account is a
+    selectable identity and proves nothing.
+    """
+    if not browser_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No browser credential. Start a session first.",
+        )
+
+    row = (
+        await db.execute(
+            select(Session).where(
+                Session.id == session_id,
+                Session.browser_id == browser_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    # 404 rather than 403: a browser that does not own this session is not
+    # told that it exists.
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
+
+    if row.expires_at <= datetime.now(UTC):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session expired. Start a new one.",
+        )
+
+    token, token_hash = new_token()
+    row.token_hash = token_hash
+    await db.commit()
+
+    account = None
+    if row.demo_account_id:
+        acct = (
+            await db.execute(select(DemoAccount).where(DemoAccount.id == row.demo_account_id))
+        ).scalar_one_or_none()
+        if acct is not None:
+            account = {
+                "slug": acct.slug,
+                "label": acct.label,
+                "tier": acct.tier.value,
+                "contract_status": acct.contract_status.value,
+            }
+
+    body = JSONResponse(
+        {
+            "session_id": str(row.id),
+            "account": account,
+            "expires_at": row.expires_at.isoformat(),
+        }
+    )
+    # Set on the response actually being returned. FastAPI merges the injected
+    # Response's headers only when the handler returns a model; return a
+    # Response directly and a cookie set on the injected one is silently
+    # dropped -- which looked exactly like the resume failing to take effect.
+    body.set_cookie(
+        SESSION_COOKIE,
+        token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=settings.session_ttl_s,
+        path="/",
+    )
+    return body
+
+
 @router.get("/sessions/{session_id}")
 async def get_session(
     session_id: UUID,

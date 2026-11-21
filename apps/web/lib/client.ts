@@ -99,6 +99,22 @@ export async function fetchResumable(): Promise<ResumableSession[]> {
   }
 }
 
+/**
+ * Point this browser's session cookie at one of its earlier sessions.
+ *
+ * Required before reading it: listing is browser-scoped, but authorisation is
+ * one cookie naming one session, so an older session is a 404 until the
+ * cookie is switched to it.
+ */
+export async function resumeSession(sessionId: string): Promise<void> {
+  await expectOk(
+    await fetch(`/api/sessions/${sessionId}/resume`, {
+      method: 'POST',
+      credentials: 'include',
+    }),
+  );
+}
+
 export async function fetchSnapshot(credentials: Credentials): Promise<SessionSnapshot> {
   const response = await expectOk(
     await fetch(`/api/sessions/${credentials.sessionId}`, {

@@ -553,3 +553,53 @@ async def test_reset_clears_conversations_but_keeps_the_session(
 
         chunks = (await db.execute(text("SELECT count(*) FROM policy_chunks"))).scalar_one()
         assert chunks > 0, "the policy corpus is not demo state"
+
+
+async def test_resuming_an_older_session_works(client: httpx.AsyncClient) -> None:
+    """The case that was broken: resume the one that is NOT the newest.
+
+    Listing is browser-scoped, but authorisation is not -- the session cookie
+    names exactly one session. Asking for the Jordan session while the cookie
+    named the newer Avery one was refused with "Session not found", which is
+    the correct answer to the wrong question. Resuming switches the cookie.
+    """
+    older = await _say_something(client, "basic-active", "The older session.")
+    newer = await _say_something(client, "premium-active", "The newer session.")
+
+    # Before resuming, the cookie names the newer one and the older is unreachable.
+    assert (await client.get(f"/api/sessions/{newer}")).status_code == 200
+    assert (await client.get(f"/api/sessions/{older}")).status_code == 404
+
+    switched = await client.post(f"/api/sessions/{older}/resume")
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["session_id"] == older
+    assert switched.json()["account"]["slug"] == "basic-active"
+
+    snapshot = await client.get(f"/api/sessions/{older}")
+    assert snapshot.status_code == 200
+    assert any("The older session." in m["content"] for m in snapshot.json()["messages"])
+
+    # The cookie now names the older one, so the newer is the unreachable one.
+    assert (await client.get(f"/api/sessions/{newer}")).status_code == 404
+
+
+async def test_another_browser_cannot_resume_a_session_it_does_not_own(
+    client: httpx.AsyncClient,
+) -> None:
+    """Resumption must not become a way to claim someone else's session."""
+    mine = await _say_something(client, "premium-active", "Mine.")
+
+    client.cookies.clear()  # a different browser
+    await _say_something(client, "basic-active", "Theirs.")
+
+    stolen = await client.post(f"/api/sessions/{mine}/resume")
+
+    assert stolen.status_code == 404
+    assert (await client.get(f"/api/sessions/{mine}")).status_code == 404
+
+
+async def test_resuming_needs_a_browser_credential(client: httpx.AsyncClient) -> None:
+    sid = await _say_something(client, "premium-active", "Something.")
+    client.cookies.clear()
+
+    assert (await client.post(f"/api/sessions/{sid}/resume")).status_code == 401

@@ -77,7 +77,7 @@ export function AccountPicker({
 
         {error !== null && (
           <div className="error-box" style={{ marginBottom: 16 }}>
-            <strong>Could not load accounts</strong>
+            <strong>Something went wrong</strong>
             <div>{error}</div>
             <button type="button" className="btn small" style={{ marginTop: 8 }} onClick={onRetry}>
               Try again
