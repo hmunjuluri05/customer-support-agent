@@ -115,19 +115,29 @@ resource "azurerm_role_assignment" "gha_deploy_acr_push" {
   principal_id         = azurerm_user_assigned_identity.gha_deploy[0].principal_id
 }
 
-# `az acr build` does not just push: it schedules a build task inside the
-# registry. AcrPush does not cover that, and the usual answer -- grant
-# Contributor on the registry -- also hands over the ability to delete
-# repositories and rotate admin credentials. This is the three actions that
-# command actually needs.
+# `az acr build` does not just push: it uploads a source context and schedules
+# a build task inside the registry. AcrPush covers none of that -- it is
+# data-plane only -- and the usual answer, Contributor on the registry, also
+# hands over deleting repositories and rotating the admin credential.
+#
+# These five are what the command actually uses. The first one is the one that
+# is easy to miss: without `registries/read` the CLI cannot resolve the
+# registry name to a login server at all, and fails with
+#
+#   ERROR: The resource with name 'acr...' and type
+#   'Microsoft.ContainerRegistry/registries' could not be found in subscription
+#
+# which reads as a deleted registry rather than a missing permission.
 resource "azurerm_role_definition" "acr_build" {
   count       = local.gha_count
   name        = "ACR Build Runner (${local.prefix})"
   scope       = azurerm_container_registry.main.id
-  description = "Schedule and follow an az acr build run. No delete, no credential access."
+  description = "Run an az acr build. No delete, no credential access."
 
   permissions {
     actions = [
+      "Microsoft.ContainerRegistry/registries/read",
+      "Microsoft.ContainerRegistry/registries/listBuildSourceUploadUrl/action",
       "Microsoft.ContainerRegistry/registries/scheduleRun/action",
       "Microsoft.ContainerRegistry/registries/runs/read",
       "Microsoft.ContainerRegistry/registries/runs/listLogSasUrl/action",
