@@ -340,6 +340,22 @@ export async function injectFault(
   );
 }
 
+/**
+ * Delete this session's conversation, keeping the session and the receipts.
+ *
+ * Narrower than the fixture reset: one conversation, not every session, and
+ * no invoice balance is touched. Money that moved stays moved.
+ */
+export async function clearHistory(credentials: Credentials): Promise<void> {
+  await expectOk(
+    await fetch(`/api/sessions/${credentials.sessionId}/history/clear`, {
+      method: 'POST',
+      headers: authHeaders(credentials),
+      credentials: 'include',
+    }),
+  );
+}
+
 export async function resetDemo(credentials: Credentials): Promise<void> {
   await expectOk(
     await fetch(`/api/sessions/${credentials.sessionId}/reset`, {

@@ -8,6 +8,7 @@ import {
   type SessionMetrics,
   type TurnTrace,
   clearCredentials,
+  clearHistory,
   createSession,
   cancelTurn,
   fetchAccounts,
@@ -458,6 +459,27 @@ export function ChatApp() {
    * answered the resume question -- which stranded the session you had just
    * stepped out of, with no way to reach it from the UI.
    */
+  /**
+   * Clear the conversation in front of you.
+   *
+   * In the top bar rather than the side panel: the side panel is the fourth
+   * card down, below the fold on a laptop, and hidden entirely under 900px.
+   * A control nobody can find is a control that does not exist.
+   */
+  const clearChat = useCallback(async () => {
+    // inFlight rather than the derived `running` flag: this callback is
+    // defined before that is computed, and the ref says the same thing.
+    if (credentials === null || inFlight.current !== null) return;
+    try {
+      await clearHistory(credentials);
+      dispatch({ kind: 'clear' });
+      setBanner(null);
+      void refreshMetrics(credentials);
+    } catch (error) {
+      setBanner(error instanceof Error ? error.message : String(error));
+    }
+  }, [credentials, refreshMetrics]);
+
   const leaveSession = useCallback(() => {
     inFlight.current?.controller.abort();
     inFlight.current = null;
@@ -503,6 +525,17 @@ export function ChatApp() {
               {account.contract_status}
             </span>
           </span>
+        )}
+        {credentials !== null && (
+          <button
+            type="button"
+            className="btn small"
+            onClick={() => void clearChat()}
+            disabled={running}
+            title="Delete this conversation. Receipts and invoice balances are kept."
+          >
+            Clear chat
+          </button>
         )}
         {credentials !== null && (
           <button

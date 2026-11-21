@@ -609,3 +609,63 @@ async def test_resuming_needs_a_browser_credential(client: httpx.AsyncClient) ->
     client.cookies.clear()
 
     assert (await client.post(f"/api/sessions/{sid}/resume")).status_code == 401
+
+
+async def test_clearing_chat_keeps_the_session_and_the_money(
+    client: httpx.AsyncClient,
+) -> None:
+    """Clearing a conversation is not the same as resetting the fixtures.
+
+    One session's transcript goes. The session stays signed in, and the
+    receipts stay: they record that money moved, and tidying a chat window is
+    not a reason to make a refund vanish from the books or to silently put an
+    invoice balance back.
+    """
+    created = await client.post("/api/sessions", json={"account_slug": "premium-active"})
+    sid = created.json()["session_id"]
+    headers = {"X-Session-Token": created.json()["session_token"]}
+    await client.post(
+        f"/api/sessions/{sid}/turns",
+        headers=headers,
+        json={"client_turn_id": "clr-1", "text": "Something to forget.", "mode": "chat"},
+    )
+
+    # A receipt that must survive, written directly: the fake chat provider in
+    # these tests never calls a tool.
+    async with get_sessionmaker()() as db:
+        invoice_id = (
+            await db.execute(text("SELECT id FROM invoices WHERE external_ref = 'INV-1001'"))
+        ).scalar_one()
+        turn_id = (
+            await db.execute(text("SELECT id FROM turns WHERE session_id = :s LIMIT 1"), {"s": sid})
+        ).scalar_one()
+        await db.execute(
+            text(
+                "INSERT INTO refunds (id, intent_id, receipt_ref, session_id, turn_id, invoice_id,"
+                " amount_minor, currency, policy_document_key, policy_version, cited_chunk_ids)"
+                " VALUES (gen_random_uuid(), 'clr-intent', 'RF-CLEARTEST', :s, :t, :i,"
+                " 1500, 'USD', 'refund-policy-premium', '2.0', '{}'::jsonb)"
+            ),
+            {"s": sid, "t": turn_id, "i": invoice_id},
+        )
+        await db.commit()
+
+    cleared = await client.post(f"/api/sessions/{sid}/history/clear", headers=headers)
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["messages"] >= 1
+
+    snapshot = await client.get(f"/api/sessions/{sid}", headers=headers)
+    assert snapshot.status_code == 200, "the session is still signed in"
+    assert snapshot.json()["messages"] == [], "the transcript is gone"
+    refs = [r["receipt_ref"] for r in snapshot.json()["receipts"]]
+    assert "RF-CLEARTEST" in refs, "the receipt is a record of money, and stays"
+
+
+async def test_clearing_chat_needs_that_session_credential(
+    client: httpx.AsyncClient,
+) -> None:
+    mine = await _say_something(client, "premium-active", "Mine.")
+    client.cookies.clear()
+    await _say_something(client, "basic-active", "Theirs.")
+
+    assert (await client.post(f"/api/sessions/{mine}/history/clear")).status_code == 404

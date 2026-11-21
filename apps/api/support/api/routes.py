@@ -5,13 +5,13 @@ from __future__ import annotations
 import hashlib
 import math
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select
+from sqlalchemy import CursorResult, delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -862,6 +862,54 @@ async def session_metrics(
             "outcomes": {key: value for key, value in outcomes.items() if value},
         }
     )
+
+
+@router.post("/sessions/{session_id}/history/clear")
+async def clear_history(
+    session_id: UUID,
+    session: Annotated[Session, Depends(authorise_session)],
+    db: AsyncSession = Depends(get_db),
+) -> JSONResponse:
+    """Delete this session's conversation. Keep the session and the money.
+
+    Distinct from the fixture reset, which puts the whole sample data set
+    back and affects every session. This clears one conversation: the
+    transcript, its turns, and the tool runs and metrics that hang off them.
+
+    Receipts and escalation tickets survive, with their `turn_id` set to null
+    by the foreign key. They are records that something happened, and a
+    customer tidying their chat window is not a reason to make a refund
+    disappear from the books -- nor to silently restore an invoice balance
+    that money really moved out of.
+
+    Not gated behind demo mode: clearing your own conversation is ordinary
+    product behaviour, not a fixture control.
+    """
+    turn_ids = (
+        (await db.execute(select(Turn.id).where(Turn.session_id == session_id))).scalars().all()
+    )
+
+    # A DELETE yields a CursorResult, which carries rowcount; the generic
+    # Result protocol does not, hence the narrowing cast.
+    messages_result = cast(
+        "CursorResult[Any]",
+        await db.execute(delete(Message).where(Message.session_id == session_id)),
+    )
+    deleted_messages = messages_result.rowcount or 0
+
+    deleted_turns = 0
+    if turn_ids:
+        # tool_runs and turn_metrics cascade from turns; refunds and tickets
+        # have their turn_id nulled rather than being removed.
+        turns_result = cast(
+            "CursorResult[Any]",
+            await db.execute(delete(Turn).where(Turn.id.in_(turn_ids))),
+        )
+        deleted_turns = turns_result.rowcount or 0
+
+    await db.commit()
+
+    return JSONResponse({"messages": deleted_messages, "turns": deleted_turns})
 
 
 # ------------------------------------------------------------ demo controls --
