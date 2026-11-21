@@ -32,7 +32,13 @@ from uuid import uuid4
 from sqlalchemy import select
 
 from support.agent.runner import TurnRunner
-from support.contracts.enums import Mode, ToolName, TurnOutcome
+from support.contracts.enums import (
+    EscalationReason,
+    GroundingDecision,
+    Mode,
+    ToolName,
+    TurnOutcome,
+)
 from support.providers.azure_openai import (
     AzureOpenAIEmbeddings,
     ChatTurn,
@@ -183,3 +189,107 @@ async def test_a_resolved_ref_releases_the_answer_with_its_citation(
     # never saw.
     assert "@" in finished.payload.citations[0].chunk_id
     assert finished.payload.citations[0].similarity > 0
+
+
+# ------------------------------------------- low confidence reaches a human --
+
+
+class _AnswersWithoutEscalating:
+    """Verifies, retrieves something unsupported, then just answers.
+
+    The failure mode this guards: the model declines to call the escalation
+    tool, the turn is still recorded as an escalation because the evidence was
+    UNSUPPORTED, and the result is a turn labelled "Escalated" with no ticket.
+    """
+
+    model = "no-escalation-chat"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, **_: object) -> ChatTurn:
+        self.calls += 1
+        usage = Usage(input_tokens=10, output_tokens=5)
+        script = [
+            (ToolName.VERIFY_IDENTITY, {}),
+            # Nothing in the corpus covers shipping addresses.
+            (
+                ToolName.RETRIEVE_POLICY,
+                {"topic": "Can you ship a replacement router to a new address?"},
+            ),
+        ]
+        if self.calls <= len(script):
+            tool, arguments = script[self.calls - 1]
+            return ChatTurn(
+                text="",
+                tool_calls=(
+                    ToolCallRequest(call_id=f"n{self.calls}", name=tool.value, arguments=arguments),
+                ),
+                usage=usage,
+            )
+        return ChatTurn(
+            text='{"answer": "I am not sure about that.", "cited_refs": []}',
+            tool_calls=(),
+            usage=usage,
+        )
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def test_unsupported_evidence_reaches_a_human_even_if_the_model_does_not(
+    premium_session,
+) -> None:
+    """ "Routing low-confidence cases to a human escalation state" is a
+    guarantee, not a hope.
+
+    Observed live: three out-of-scope phrasings produced three behaviours --
+    a ticket, a clarifying question, and an "escalation" outcome with no
+    ticket row anywhere. The gate itself was sound (no claim, no action), but
+    the routing depended on the model choosing to call the tool.
+    """
+    async with get_sessionmaker()() as db:
+        turn = Turn(
+            session_id=premium_session.id,
+            client_turn_id=f"esc-{uuid4().hex[:8]}",
+            mode=Mode.CHAT,
+            input_hash=uuid4().hex[:16],
+        )
+        db.add(turn)
+        await db.commit()
+
+        provider = AzureOpenAIEmbeddings()
+        try:
+            runner = TurnRunner(db, chat=_AnswersWithoutEscalating(), embeddings=provider)
+            events = [
+                event
+                async for event in runner.run(
+                    turn=turn,
+                    session_id=premium_session.id,
+                    user_text="Please ship a replacement router to my new address.",
+                    history=[],
+                )
+            ]
+        finally:
+            await provider.aclose()
+        await db.commit()
+
+    grounding = next(e for e in events if e.type == "grounding.decided")
+    assert grounding.payload.decision is GroundingDecision.UNSUPPORTED
+
+    created = [e for e in events if e.type == "escalation.created"]
+    assert len(created) == 1, "an unsupported request must reach a human"
+    assert created[0].payload.reason is EscalationReason.INSUFFICIENT_EVIDENCE
+
+    finished = next(e for e in events if e.type == "turn.finished")
+    assert finished.payload.outcome is TurnOutcome.ESCALATION
+
+    # The chip and the ticket agree, because the ticket is a real row.
+    async with get_sessionmaker()() as db:
+        tickets = (
+            (await db.execute(select(EscalationTicket).where(EscalationTicket.turn_id == turn.id)))
+            .scalars()
+            .all()
+        )
+    assert len(tickets) == 1
+    assert tickets[0].ticket_ref == created[0].payload.ticket_ref

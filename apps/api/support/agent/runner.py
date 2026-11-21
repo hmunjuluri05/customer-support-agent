@@ -175,6 +175,7 @@ class TurnRunner:
         cited_refs: list[int] = []
         grounding_emitted = False
         commit_reported = False
+        escalation_reported = False
 
         deadline = started + self._settings.turn_budget_s
 
@@ -353,6 +354,7 @@ class TurnRunner:
                                     summary=str(p["summary"]),
                                 ),
                             )
+                            escalation_reported = True
                             outcome = TurnOutcome.ESCALATION
 
                         messages.append(
@@ -403,6 +405,28 @@ class TurnRunner:
             )
             final_text = ""
             outcome = TurnOutcome.RECOVERABLE_FAILURE
+
+        # Low confidence has to actually reach a human.
+        #
+        # UNSUPPORTED evidence means the policy library cannot support an
+        # answer, and the turn is recorded as an escalation. Whether a ticket
+        # exists was, until here, up to the model: it would sometimes answer
+        # without calling the tool, leaving a turn labelled "Escalated" with
+        # nothing to show for it -- a claim the database does not support, and
+        # the third place this project has found that same shape.
+        #
+        # The ticket is created through the executor, not around it, so it is
+        # guarded, audited and idempotent like any other action.
+        if (
+            not escalation_reported
+            and ctx.evidence is not None
+            and ctx.evidence.decision is GroundingDecision.UNSUPPORTED
+        ):
+            async for event in self._escalate_unsupported(ctx, seq, user_text):
+                yield event
+                if event.type == "escalation.created":
+                    escalation_reported = True
+                    outcome = TurnOutcome.ESCALATION
 
         # Money first, words second. If a refund committed but the call that
         # committed it never reported back, the receipt is recovered here and
@@ -598,6 +622,81 @@ class TurnRunner:
                     "retrying after %s in %.2fs (attempt %d)", exc.error_code, delay, attempt
                 )
                 await asyncio.sleep(delay)
+
+    async def _escalate_unsupported(
+        self,
+        ctx: TurnContext,
+        seq: _Sequencer,
+        user_text: str,
+    ) -> AsyncIterator[Any]:
+        """Route an unsupported request to a human, if the model did not.
+
+        Reason `insufficient_evidence` rather than `unsupported_topic`: what
+        the server can attest is that retrieval ran and nothing cleared the
+        threshold. Whether the topic is unsupported in general is a judgement
+        it has not made.
+
+        A failure here is swallowed deliberately. The customer has already
+        been told no claim can be made; turning a bookkeeping problem into a
+        second visible error would make the turn worse, and the tool run is
+        recorded either way.
+        """
+        summary = (
+            "Retrieval found no policy passage above the confidence threshold "
+            f"for this request, so no answer was given. Customer asked: {user_text[:400]}"
+        )
+        yield seq.make(
+            ToolStarted,
+            ToolStartedPayload(
+                tool=ToolName.CREATE_ESCALATION_TICKET,
+                call_index=ctx.calls_made,
+                summary=_starting_summary(ToolName.CREATE_ESCALATION_TICKET),
+            ),
+        )
+        result = await self._executor.invoke(
+            ctx,
+            ToolName.CREATE_ESCALATION_TICKET,
+            {"reason": EscalationReason.INSUFFICIENT_EVIDENCE.value, "summary": summary},
+        )
+
+        if result.status is not ToolStatus.COMPLETED or not result.payload.get("ticket_ref"):
+            logger.warning(
+                "could not raise an escalation for unsupported evidence turn=%s: %s",
+                ctx.turn_id,
+                result.summary,
+            )
+            yield seq.make(
+                ToolFailed,
+                ToolFailedPayload(
+                    tool=ToolName.CREATE_ESCALATION_TICKET,
+                    call_index=result.call_index,
+                    duration_ms=result.duration_ms,
+                    summary=result.summary,
+                    error_code=result.error_code or "escalation_failed",
+                    retryable=result.retryable,
+                ),
+            )
+            return
+
+        payload = result.payload
+        yield seq.make(
+            ToolCompleted,
+            ToolCompletedPayload(
+                tool=ToolName.CREATE_ESCALATION_TICKET,
+                call_index=result.call_index,
+                duration_ms=result.duration_ms,
+                summary=result.summary,
+            ),
+        )
+        yield seq.make(
+            EscalationCreated,
+            EscalationCreatedPayload(
+                ticket_ref=str(payload["ticket_ref"]),
+                intent_id=str(payload["intent_id"]),
+                reason=EscalationReason(payload["reason"]),
+                summary=str(payload["summary"]),
+            ),
+        )
 
     async def _reconcile_committed_actions(
         self,

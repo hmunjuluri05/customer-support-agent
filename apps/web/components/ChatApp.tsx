@@ -725,7 +725,12 @@ function buildSuggestions(accounts: DemoAccount[], slug: string | null): Suggest
 
   suggestions.push({
     label: 'Out of scope',
-    text: 'Can you tell me when my next shipment arrives?',
+    // Phrased as a policy question on purpose. "When does my shipment
+    // arrive?" is ambiguous enough that the agent reasonably asks which
+    // subscription first, and the low-confidence path is never entered. This
+    // wording has one obvious answer to look for, nothing in the corpus
+    // supports it, and the turn lands in UNSUPPORTED every time.
+    text: 'What is your policy on shipping replacement hardware to a different address?',
   });
 
   return suggestions;
