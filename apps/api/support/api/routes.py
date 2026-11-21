@@ -18,11 +18,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from support.agent.prompts import SYSTEM_PROMPT
 from support.agent.runner import TurnRunner
 from support.api.deps import (
+    BROWSER_COOKIE,
+    BROWSER_COOKIE_MAX_AGE_S,
     SESSION_COOKIE,
     authorise_session,
     client_ip,
     get_db,
-    hash_token,
+    new_browser_id,
     new_token,
     settings_dep,
 )
@@ -134,6 +136,7 @@ async def create_session(
     response: Response,
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(settings_dep),
+    browser_id: str | None = Cookie(default=None, alias=BROWSER_COOKIE),
 ) -> CreateSessionResponse:
     account = None
     if body.account_slug:
@@ -143,9 +146,14 @@ async def create_session(
         if account is None:
             raise HTTPException(status_code=404, detail="Unknown demo account.")
 
+    # One browser, many sessions -- typically one per demo account. The session
+    # cookie names only the newest, so resumption needs this instead.
+    browser = browser_id or new_browser_id()
+
     token, token_hash = new_token()
     row = Session(
         token_hash=token_hash,
+        browser_id=browser,
         demo_account_id=account.id if account else None,
         # Binding the account is the verification event. The tool still reads
         # it from here rather than trusting anything the model says.
@@ -163,6 +171,17 @@ async def create_session(
         secure=True,
         samesite="lax",
         max_age=settings.session_ttl_s,
+        path="/",
+    )
+
+    # Re-set each time, so an active visitor's window keeps rolling forward.
+    response.set_cookie(
+        BROWSER_COOKIE,
+        browser,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=BROWSER_COOKIE_MAX_AGE_S,
         path="/",
     )
 
@@ -184,79 +203,103 @@ async def create_session(
 
 
 @router.get("/sessions/current")
-async def get_current_session(
+async def get_current_sessions(
     db: AsyncSession = Depends(get_db),
-    cookie_token: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+    browser_id: str | None = Cookie(default=None, alias=BROWSER_COOKIE),
 ) -> JSONResponse:
-    """The session this browser already holds a cookie for, if it is still live.
+    """Live sessions this browser created, newest first, one per demo account.
 
     Declared before `/sessions/{session_id}` so "current" is not parsed as a
     UUID path parameter.
 
-    Closing a browser does not end a session here: the row, its transcript and
-    its receipts live for `session_ttl_s`, and the cookie is set with a
-    matching max-age, so both survive a restart. What does not survive is
-    sessionStorage, which held the session *id* -- so the session was still
-    there and reachable, and the browser simply could not find its way back to
-    it. This endpoint is that way back.
+    Closing a browser does not end a session: the row, its transcript and its
+    receipts live for `session_ttl_s`. What does not survive is sessionStorage,
+    which held the session *id* -- so the sessions sit in the database,
+    reachable, and the browser cannot name them. This is the way back.
 
-    **It returns no token.** The cookie is httpOnly and stays that way: the
-    client resumes by calling the normal endpoints with `credentials:
-    "include"` and no `X-Session-Token` header, which `authorise_session`
-    already accepts. Handing the token back to JavaScript would mean an XSS
-    after a browser restart could steal a credential that, today, is not
-    reachable from script at all.
+    **Keyed on the browser, never on the account.** The demo account is a
+    public dropdown choice and proves nothing: resuming "the latest Jordan
+    Patel session" would hand one visitor another visitor's transcript and
+    receipts. The browser id is an unguessable httpOnly cookie, so what is
+    being proved is "this browser created that session". The account is only
+    the label shown against it.
 
-    Answers for the caller's own cookie only, so it cannot be used to discover
-    that some other session exists.
+    **Returns no token.** The session cookie stays httpOnly; the client resumes
+    by calling the normal endpoints with `credentials: "include"`, which
+    `authorise_session` already accepts. Handing tokens back to JavaScript
+    would mean an XSS after a restart could steal credentials that are
+    currently out of reach of script.
     """
-    if not cookie_token:
-        return JSONResponse({"session": None})
+    if not browser_id:
+        return JSONResponse({"sessions": []})
 
-    row = (
-        await db.execute(select(Session).where(Session.token_hash == hash_token(cookie_token)))
-    ).scalar_one_or_none()
+    rows = (
+        (
+            await db.execute(
+                select(Session)
+                .where(
+                    Session.browser_id == browser_id,
+                    Session.expires_at > datetime.now(UTC),
+                )
+                .order_by(Session.created_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
 
-    if row is None or row.expires_at <= datetime.now(UTC):
-        return JSONResponse({"session": None})
+    out: list[dict[str, Any]] = []
+    seen_accounts: set[UUID | None] = set()
 
-    account = None
-    if row.demo_account_id:
-        acct = (
-            await db.execute(select(DemoAccount).where(DemoAccount.id == row.demo_account_id))
-        ).scalar_one_or_none()
-        if acct is not None:
-            account = {
-                "slug": acct.slug,
-                "label": acct.label,
-                "tier": acct.tier.value,
-                "contract_status": acct.contract_status.value,
-            }
+    for row in rows:
+        # Newest first, so the first session seen for an account is the one
+        # worth offering. Older ones for the same account would be a list of
+        # near-identical cards with no way to tell them apart.
+        if row.demo_account_id in seen_accounts:
+            continue
 
-    messages = (
-        await db.execute(select(func.count(Message.id)).where(Message.session_id == row.id))
-    ).scalar_one()
+        messages = (
+            await db.execute(select(func.count(Message.id)).where(Message.session_id == row.id))
+        ).scalar_one()
 
-    last = (
-        await db.execute(select(func.max(Message.created_at)).where(Message.session_id == row.id))
-    ).scalar_one()
+        # An empty session is a choice between a blank transcript and a blank
+        # transcript, so it is not offered -- but it still claims its account,
+        # since a newer empty session means the older one was left behind.
+        seen_accounts.add(row.demo_account_id)
+        if messages == 0:
+            continue
 
-    # An empty session is not worth offering to resume: the customer would be
-    # choosing between a blank transcript and a blank transcript.
-    if messages == 0:
-        return JSONResponse({"session": None})
+        account = None
+        if row.demo_account_id:
+            acct = (
+                await db.execute(select(DemoAccount).where(DemoAccount.id == row.demo_account_id))
+            ).scalar_one_or_none()
+            if acct is not None:
+                account = {
+                    "slug": acct.slug,
+                    "label": acct.label,
+                    "customer_name": acct.customer_name,
+                    "tier": acct.tier.value,
+                    "contract_status": acct.contract_status.value,
+                }
 
-    return JSONResponse(
-        {
-            "session": {
+        last = (
+            await db.execute(
+                select(func.max(Message.created_at)).where(Message.session_id == row.id)
+            )
+        ).scalar_one()
+
+        out.append(
+            {
                 "session_id": str(row.id),
                 "account": account,
                 "messages": messages,
                 "last_activity": last.isoformat() if last else None,
                 "expires_at": row.expires_at.isoformat(),
             }
-        }
-    )
+        )
+
+    return JSONResponse({"sessions": out})
 
 
 @router.get("/sessions/{session_id}")

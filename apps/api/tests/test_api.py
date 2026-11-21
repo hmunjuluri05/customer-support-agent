@@ -18,7 +18,7 @@ from uuid import UUID
 
 import httpx
 import pytest_asyncio
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 
 from support.api.app import create_app
 from support.api.ratelimit import RateLimiter
@@ -389,98 +389,167 @@ async def test_same_turn_id_different_text_is_conflict(client: httpx.AsyncClient
 
 
 # ------------------------------------------------------------ resumption --
+#
+# The property under test throughout: resumption is scoped to the BROWSER, not
+# to the demo account. The account is a public dropdown choice, so keying on it
+# would let any visitor pick "Jordan Patel" and read the previous visitor's
+# transcript, receipts and traces. The browser id is an unguessable httpOnly
+# cookie; the account is only the label shown against it.
+
+
+async def _say_something(client: httpx.AsyncClient, slug: str, text: str) -> str:
+    """Create a session for `slug` and give it a transcript worth resuming."""
+    created = await client.post("/api/sessions", json={"account_slug": slug})
+    sid = created.json()["session_id"]
+    await client.post(
+        f"/api/sessions/{sid}/turns",
+        headers={"X-Session-Token": created.json()["session_token"]},
+        json={"client_turn_id": f"r-{sid[:8]}", "text": text, "mode": "chat"},
+    )
+    return str(sid)
 
 
 async def test_no_cookie_means_nothing_to_resume(client: httpx.AsyncClient) -> None:
     response = await client.get("/api/sessions/current")
     assert response.status_code == 200
-    assert response.json()["session"] is None
+    assert response.json()["sessions"] == []
 
 
-async def test_a_browser_can_find_its_way_back_to_its_session(
+async def test_a_browser_is_offered_its_own_sessions_one_per_account(
     client: httpx.AsyncClient,
 ) -> None:
-    """Closing a browser does not end a session, it only loses the id.
+    """Two accounts in one browser, both resumable.
 
-    sessionStorage holds the session id and dies with the tab; the httpOnly
-    cookie and the session row both outlive it. Without this endpoint the
-    transcript is still sitting in the database, reachable, and the browser
-    simply cannot name it.
+    The session cookie names only the newest session, which is why signing in
+    as a second account used to make the first unreachable even though it was
+    still in the database and still the same visitor's.
     """
-    created = await client.post("/api/sessions", json={"account_slug": "premium-active"})
-    sid = created.json()["session_id"]
-    token = created.json()["session_token"]
+    jordan = await _say_something(client, "basic-active", "Jordan was here.")
+    avery = await _say_something(client, "premium-active", "Avery was here.")
 
-    # Say something, so there is a transcript worth coming back to.
-    await client.post(
-        f"/api/sessions/{sid}/turns",
-        headers={"X-Session-Token": token},
-        json={"client_turn_id": "resume-1", "text": "Hello there.", "mode": "chat"},
-    )
+    sessions = (await client.get("/api/sessions/current")).json()["sessions"]
 
-    # The cookie rides on the client; the header is what a closed tab loses.
-    response = await client.get("/api/sessions/current")
-    assert response.status_code == 200
-    session = response.json()["session"]
-    assert session is not None
-    assert session["session_id"] == sid
-    assert session["account"]["slug"] == "premium-active"
-    assert session["messages"] >= 1
+    by_slug = {s["account"]["slug"]: s for s in sessions}
+    assert by_slug.keys() == {"basic-active", "premium-active"}
+    assert by_slug["basic-active"]["session_id"] == jordan
+    assert by_slug["premium-active"]["session_id"] == avery
+    assert by_slug["basic-active"]["messages"] >= 1
+    # Newest first, so the picker leads with what was last touched.
+    assert sessions[0]["session_id"] == avery
 
-    # And the cookie alone is enough to read it back: resuming never needs the
-    # token handed to JavaScript.
-    snapshot = await client.get(f"/api/sessions/{sid}")
-    assert snapshot.status_code == 200
-    assert len(snapshot.json()["messages"]) >= 1
+
+async def test_another_browser_sees_none_of_them(client: httpx.AsyncClient) -> None:
+    """The isolation question: someone else opening the demo link.
+
+    Clearing the cookie jar is what a different browser, a different machine or
+    a private window looks like to the server -- no browser id, so no claim on
+    anything created before.
+    """
+    mine = await _say_something(client, "basic-active", "My transcript.")
+    assert len((await client.get("/api/sessions/current")).json()["sessions"]) == 1
+
+    client.cookies.clear()  # a different visitor arrives
+
+    assert (await client.get("/api/sessions/current")).json()["sessions"] == []
+
+    # And signing in as the SAME demo account does not inherit the transcript:
+    # picking "Jordan Patel" is not a claim of ownership.
+    theirs = await _say_something(client, "basic-active", "Their transcript.")
+    sessions = (await client.get("/api/sessions/current")).json()["sessions"]
+
+    assert [s["session_id"] for s in sessions] == [theirs]
+    assert mine not in [s["session_id"] for s in sessions]
+
+    # Nor can they read it directly, even holding the id.
+    assert (await client.get(f"/api/sessions/{mine}")).status_code == 404
 
 
 async def test_an_empty_session_is_not_offered(client: httpx.AsyncClient) -> None:
     """Resuming a blank transcript is a choice between nothing and nothing."""
     await client.post("/api/sessions", json={"account_slug": "premium-active"})
 
-    assert (await client.get("/api/sessions/current")).json()["session"] is None
-
-
-async def test_resumption_answers_only_for_the_callers_own_cookie(
-    client: httpx.AsyncClient,
-) -> None:
-    """It must not become a way to discover that someone else's session exists."""
-    first = await client.post("/api/sessions", json={"account_slug": "premium-active"})
-    first_id = first.json()["session_id"]
-    await client.post(
-        f"/api/sessions/{first_id}/turns",
-        headers={"X-Session-Token": first.json()["session_token"]},
-        json={"client_turn_id": "r-1", "text": "First session.", "mode": "chat"},
-    )
-
-    # A second sign-in replaces the cookie, as a new visitor's browser would.
-    second = await client.post("/api/sessions", json={"account_slug": "basic-active"})
-    second_id = second.json()["session_id"]
-    await client.post(
-        f"/api/sessions/{second_id}/turns",
-        headers={"X-Session-Token": second.json()["session_token"]},
-        json={"client_turn_id": "r-2", "text": "Second session.", "mode": "chat"},
-    )
-
-    session = (await client.get("/api/sessions/current")).json()["session"]
-    assert session["session_id"] == second_id, "the cookie names one session, the current one"
-    assert session["session_id"] != first_id
+    assert (await client.get("/api/sessions/current")).json()["sessions"] == []
 
 
 async def test_an_expired_session_is_not_offered(client: httpx.AsyncClient) -> None:
-    """The row outlives the credential. Expiry must end the offer, not the data."""
-    created = await client.post("/api/sessions", json={"account_slug": "premium-active"})
-    sid = created.json()["session_id"]
-    await client.post(
-        f"/api/sessions/{sid}/turns",
-        headers={"X-Session-Token": created.json()["session_token"]},
-        json={"client_turn_id": "exp-1", "text": "Still here?", "mode": "chat"},
-    )
-    assert (await client.get("/api/sessions/current")).json()["session"] is not None
+    """The row outlives the credential. Expiry ends the offer, not the data."""
+    sid = await _say_something(client, "premium-active", "Still here?")
+    assert len((await client.get("/api/sessions/current")).json()["sessions"]) == 1
 
     async with get_sessionmaker()() as db:
         row = (await db.execute(select(Session).where(Session.id == UUID(sid)))).scalar_one()
         row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
         await db.commit()
 
-    assert (await client.get("/api/sessions/current")).json()["session"] is None
+    assert (await client.get("/api/sessions/current")).json()["sessions"] == []
+
+
+async def test_resuming_reads_the_transcript_back_with_the_cookie_alone(
+    client: httpx.AsyncClient,
+) -> None:
+    """No token is handed to JavaScript to make resumption work."""
+    sid = await _say_something(client, "premium-active", "Remember this.")
+
+    snapshot = await client.get(f"/api/sessions/{sid}")  # cookie only, no header
+
+    assert snapshot.status_code == 200
+    assert any("Remember this." in m["content"] for m in snapshot.json()["messages"])
+
+
+# ----------------------------------------------------------------- reset --
+
+
+async def test_reset_clears_conversations_but_keeps_the_session(
+    client: httpx.AsyncClient,
+) -> None:
+    """Reset is for demo state, not for signing everyone out.
+
+    It used to delete every session row, which destroyed every resumable
+    conversation in every browser -- including other people's, mid-demo. A
+    control for tidying up after a demo should not end the demo.
+    """
+    created = await client.post("/api/sessions", json={"account_slug": "premium-active"})
+    sid = created.json()["session_id"]
+    headers = {"X-Session-Token": created.json()["session_token"]}
+    await client.post(
+        f"/api/sessions/{sid}/turns",
+        headers=headers,
+        json={"client_turn_id": "reset-1", "text": "Before the reset.", "mode": "chat"},
+    )
+    await client.post(f"/api/sessions/{sid}/fault", headers=headers, json={"fault": "tool_error"})
+
+    # Something structural to prove survives, and something stateful to prove does not.
+    async with get_sessionmaker()() as db:
+        await db.execute(
+            text("UPDATE invoices SET refunded_minor = 999 WHERE external_ref = 'INV-1001'")
+        )
+        await db.commit()
+
+    assert (await client.post(f"/api/sessions/{sid}/reset", headers=headers)).status_code == 200
+
+    # The session is still signed in and still readable.
+    snapshot = await client.get(f"/api/sessions/{sid}", headers=headers)
+    assert snapshot.status_code == 200
+    assert snapshot.json()["messages"] == [], "the transcript should be gone"
+
+    async with get_sessionmaker()() as db:
+        row = (await db.execute(select(Session).where(Session.id == UUID(sid)))).scalar_one()
+        assert row.injected_fault is None, "an armed fault is demo state too"
+
+        # Structural data is untouched; only the balance the receipts moved is.
+        balance = (
+            await db.execute(
+                text("SELECT refunded_minor FROM invoices WHERE external_ref = 'INV-1001'")
+            )
+        ).scalar_one()
+        assert balance == 0, "fixture balance restored"
+
+        seeded = (
+            await db.execute(
+                text("SELECT refunded_minor FROM invoices WHERE external_ref = 'INV-1002'")
+            )
+        ).scalar_one()
+        assert seeded == 3800, "INV-1002 is seeded partially refunded, and stays that way"
+
+        chunks = (await db.execute(text("SELECT count(*) FROM policy_chunks"))).scalar_one()
+        assert chunks > 0, "the policy corpus is not demo state"

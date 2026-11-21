@@ -142,6 +142,16 @@ class Session(Base):
     id: Mapped[UUID] = _pk()
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
 
+    # Which browser created this session.
+    #
+    # An opaque, long-lived value from an httpOnly cookie, so a visitor can be
+    # offered their own earlier sessions -- one per demo account -- after
+    # closing the browser. It is deliberately NOT the account: the account is a
+    # public dropdown choice and proves nothing, so keying resumption on it
+    # would hand one visitor another visitor's transcript. This is a secret the
+    # browser holds; the account name is only the label shown against it.
+    browser_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
     # Bound by the UI sign-in control, server-side. A chat message claiming an
     # account or tier never sets this.
     demo_account_id: Mapped[UUID | None] = mapped_column(

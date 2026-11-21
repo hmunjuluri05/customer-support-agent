@@ -44,7 +44,7 @@ export function ChatApp() {
   const [credentials, setCredentials] = useState<Credentials | null>(null);
   const [account, setAccount] = useState<SessionAccount | null>(null);
   const [signingIn, setSigningIn] = useState(false);
-  const [resumable, setResumable] = useState<ResumableSession | null>(null);
+  const [resumable, setResumable] = useState<ResumableSession[]>([]);
   const [banner, setBanner] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [chat, dispatch] = useReducer(reduce, initialState);
@@ -190,11 +190,10 @@ export function ChatApp() {
    * resumed session never puts a bearer token into JavaScript that the browser
    * did not already have.
    */
-  const resume = useCallback(async () => {
-    if (resumable === null) return;
+  const resume = useCallback(async (session: ResumableSession) => {
     setSigningIn(true);
     setAccountsError(null);
-    const credentials: Credentials = { sessionId: resumable.session_id, token: null };
+    const credentials: Credentials = { sessionId: session.session_id, token: null };
     try {
       const snapshot = await fetchSnapshot(credentials);
       saveCredentials(credentials);
@@ -202,20 +201,23 @@ export function ChatApp() {
       setAccount(snapshot.account);
       dispatch({ kind: 'restore', snapshot });
       setPhase('chatting');
-      setResumable(null);
+      setResumable([]);
       void refreshMetrics(credentials);
     } catch (error) {
-      // Expired between the offer and the click, most likely.
+      // Expired or reset between the offer and the click, most likely. Drop
+      // just that card rather than the whole list.
       setAccountsError(
         error instanceof Error
           ? `That session could not be resumed: ${error.message}`
           : String(error),
       );
-      setResumable(null);
+      setResumable((current) =>
+        current.filter((item) => item.session_id !== session.session_id),
+      );
     } finally {
       setSigningIn(false);
     }
-  }, [refreshMetrics, resumable]);
+  }, [refreshMetrics]);
 
   const submit = useCallback(
     async (text: string, mode: Mode = 'chat') => {
@@ -343,18 +345,15 @@ export function ChatApp() {
     setResetNote(null);
     try {
       await resetDemo(credentials);
-      // The reset clears every session row, including this one, so the token
-      // in hand is dead the moment it returns. Signing in again is part of
-      // the operation, not a separate step the user has to discover.
-      const slug = account?.slug ?? null;
-      clearCredentials();
+      // The session survives the reset now -- only its conversation and action
+      // history are cleared -- so there is nothing to sign back in to. The
+      // transcript is dropped locally to match the server, and the armed fault
+      // is cleared server-side as part of the same operation.
       setArmedFault('none');
       setSessionMetrics(null);
       dispatch({ kind: 'clear' });
       await loadAccounts();
-      if (slug !== null) await signIn(slug);
-      else setPhase('picking');
-      setResetNote('Fixture balances restored, new session started.');
+      setResetNote('Conversations cleared and fixture balances restored.');
     } catch (error) {
       setBanner(error instanceof Error ? error.message : String(error));
     } finally {
@@ -459,7 +458,7 @@ export function ChatApp() {
     setTrace(null);
     // Asking for a new session is an answer to the resume question, so do not
     // then offer to resume the one just abandoned.
-    setResumable(null);
+    setResumable([]);
     dispatch({ kind: 'clear' });
     setPhase('picking');
   }, []);
@@ -509,7 +508,7 @@ export function ChatApp() {
           error={accountsError}
           resumable={resumable}
           onPick={(slug) => void signIn(slug)}
-          onResume={() => void resume()}
+          onResume={(session) => void resume(session)}
           onRetry={() => void loadAccounts()}
         />
       )}

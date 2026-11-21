@@ -26,6 +26,26 @@ from support.storage.session import get_sessionmaker
 
 SESSION_COOKIE = "support_session"
 
+# Identifies the browser, not the person and not the account.
+#
+# Long-lived and opaque, so a visitor returning after a restart can be offered
+# the sessions they created -- including one per demo account, which a single
+# session cookie cannot express because it names only the newest.
+BROWSER_COOKIE = "support_browser"
+
+# Long enough to outlive any plausible demo gap, short enough that an abandoned
+# browser does not carry a resumable identity indefinitely.
+BROWSER_COOKIE_MAX_AGE_S = 30 * 24 * 60 * 60
+
+
+def new_browser_id() -> str:
+    """An unguessable browser identifier.
+
+    Unguessable matters: it is the only thing standing between a visitor and
+    someone else's transcript, because the demo account is a public choice.
+    """
+    return secrets.token_urlsafe(24)
+
 
 def new_token() -> tuple[str, str]:
     """Returns (plaintext token, storage hash)."""

@@ -33,16 +33,18 @@ export function AccountPicker({
   accounts: DemoAccount[];
   busy: boolean;
   error: string | null;
-  /** A live session this browser still holds a cookie for, or null. */
-  resumable: ResumableSession | null;
+  /** Sessions this browser can resume, newest first, one per account. */
+  resumable: ResumableSession[];
   onPick: (slug: string) => void;
-  onResume: () => void;
+  onResume: (session: ResumableSession) => void;
   onRetry: () => void;
 }) {
   return (
     <div className="picker">
       <div className="picker-inner">
-        <h2>{resumable === null ? 'Sign in as a demo customer' : 'Resume, or start fresh'}</h2>
+        <h2>
+          {resumable.length === 0 ? 'Sign in as a demo customer' : 'Resume, or start fresh'}
+        </h2>
         <p className="lede">
           Three synthetic accounts, chosen so the same request — a $15.00 refund on a $40.00
           invoice — produces a different, correctly-cited outcome on each.
@@ -51,21 +53,27 @@ export function AccountPicker({
         {/* Offered, never automatic. Closing a browser is a reasonable way to
             mean "I am done", and a shared machine must not drop the next
             person into the previous one's transcript. */}
-        {resumable !== null && (
-          <div className="resume-card">
+        {resumable.map((session) => (
+          <div className="resume-card" key={session.session_id}>
             <div>
-              <strong>Resume your previous session</strong>
+              <strong>
+                Resume · {session.account?.customer_name ?? session.account?.label ?? 'No account'}
+              </strong>
               <div className="invoice-note">
-                {resumable.account?.label ?? 'No account bound'} · {resumable.messages} message
-                {resumable.messages === 1 ? '' : 's'}
-                {resumable.last_activity !== null && ` · last active ${ago(resumable.last_activity)}`}
+                {session.messages} message{session.messages === 1 ? '' : 's'}
+                {session.last_activity !== null && ` · last active ${ago(session.last_activity)}`}
               </div>
             </div>
-            <button type="button" className="btn primary" disabled={busy} onClick={onResume}>
+            <button
+              type="button"
+              className="btn primary"
+              disabled={busy}
+              onClick={() => onResume(session)}
+            >
               Resume
             </button>
           </div>
-        )}
+        ))}
 
         {error !== null && (
           <div className="error-box" style={{ marginBottom: 16 }}>

@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, delete, select, text
+from sqlalchemy import CursorResult, delete, select, text, update
 
 from support.config import get_settings
 from support.contracts.enums import ContractStatus, Tier
@@ -67,10 +67,21 @@ def load_fixtures() -> dict[str, Any]:
 
 
 async def reset_activity() -> dict[str, int]:
-    """Remove demo activity and restore invoice balances.
+    """Clear the conversation and action history, and nothing structural.
 
-    Deliberately does NOT delete accounts or invoices: the reviewer keeps the
-    same seeded identities, just with a clean history.
+    What goes: transcripts, turns, tool runs, metrics, receipts and tickets,
+    across every session, plus the invoice balances those receipts moved.
+    Balances travel with receipts deliberately -- deleting a refund while
+    leaving the invoice showing it was refunded would be a database that
+    disagrees with itself.
+
+    What stays: the policy corpus and its embeddings, the demo accounts, the
+    invoice rows themselves, and -- since this block -- the sessions.
+
+    Sessions used to be deleted here, which quietly destroyed every resumable
+    conversation in every browser, including other people's mid-demo. A
+    control meant to clean up after a demo should not sign everyone out of it.
+    The armed fault is cleared instead, because that is demo state too.
     """
     counts: dict[str, int] = {}
     async with transaction() as db:
@@ -83,14 +94,26 @@ async def reset_activity() -> dict[str, int]:
             ("escalation_tickets", delete(EscalationTicket)),
             ("messages", delete(Message)),
             ("turns", delete(Turn)),
-            ("sessions", delete(Session)),
         ):
             # A DELETE yields a CursorResult, which carries rowcount; the
             # generic Result protocol does not, hence the narrowing cast.
             result = cast("CursorResult[Any]", await db.execute(stmt))
             counts[label] = result.rowcount or 0
 
-        # Restore refunded balances to their seeded values.
+        # Sessions survive, so whoever is mid-demo stays signed in and keeps
+        # their resumable history. Only the demo state on them is cleared.
+        result = cast(
+            "CursorResult[Any]",
+            await db.execute(
+                update(Session)
+                .where(Session.injected_fault.is_not(None))
+                .values(injected_fault=None)
+            ),
+        )
+        counts["faults_cleared"] = result.rowcount or 0
+
+        # Restore refunded balances to their seeded values. seed() then re-applies
+        # the fixture amounts, which is how INV-1002 gets its partial refund back.
         await db.execute(text("UPDATE invoices SET refunded_minor = 0"))
     return counts
 

@@ -68,28 +68,34 @@ export async function createSession(accountSlug: string | null): Promise<Created
   return (await response.json()) as CreatedSession;
 }
 
-/** A live session this browser still holds a cookie for, if any. */
+/** A live session this browser created, identified by its own cookie. */
 export interface ResumableSession {
   session_id: string;
-  account: SessionAccount | null;
+  account: (SessionAccount & { customer_name?: string }) | null;
   messages: number;
   last_activity: string | null;
   expires_at: string;
 }
 
-export async function fetchResumable(): Promise<ResumableSession | null> {
+/**
+ * Sessions this browser can resume: newest first, at most one per account.
+ *
+ * Keyed on the browser's own cookie, never on the account — which is a public
+ * dropdown choice and would hand one visitor another visitor's transcript.
+ */
+export async function fetchResumable(): Promise<ResumableSession[]> {
   try {
     const response = await fetch('/api/sessions/current', {
       credentials: 'include',
       cache: 'no-store',
     });
-    if (!response.ok) return null;
-    const body = (await response.json()) as { session: ResumableSession | null };
-    return body.session;
+    if (!response.ok) return [];
+    const body = (await response.json()) as { sessions?: ResumableSession[] };
+    return body.sessions ?? [];
   } catch {
     // Offering to resume is a convenience. If the lookup fails the picker
     // still works, which is the behaviour that must not break.
-    return null;
+    return [];
   }
 }
 
