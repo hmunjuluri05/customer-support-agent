@@ -126,16 +126,46 @@ jobs:
       # GitHub minted for this repository, and this identity holds data-plane
       # inference access and nothing else.
       #
-      # The Python code reaches the same account through DefaultAzureCredential,
-      # which falls through to the Azure CLI credential this step establishes.
-      # AZURE_CLIENT_ID is deliberately NOT exported into the job environment:
-      # the application reads it as "use this managed identity", which does not
-      # exist on a hosted runner.
+      # Kept for `az` itself and because it fails loudly and early if the
+      # federation is wrong. The Python SDK is authenticated separately, by the
+      # token file written below.
       - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID_CI }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Hand the Azure SDK a federated token directly, instead of hoping
+      # DefaultAzureCredential falls through to the CLI session above.
+      #
+      # It does not reliably fall through. `azure/login` exports
+      # AZURE_CLIENT_ID, this application reads that as "use this managed
+      # identity", and ManagedIdentityCredential then fails with a hard
+      # ClientAuthenticationError rather than reporting itself unavailable --
+      # which halts the chain before AzureCliCredential is ever tried:
+      #
+      #   Attempted credentials:
+      #     EnvironmentCredential: ... not fully configured
+      #     WorkloadIdentityCredential: ... not fully configured
+      #     ManagedIdentityCredential: No token received.
+      #
+      # Writing the token file satisfies WorkloadIdentityCredential, which sits
+      # ahead of managed identity in the chain, so authentication is decided
+      # rather than negotiated. Same federated credential as azure/login uses.
+      - name: Federated token for the Azure SDK
+        run: |
+          set -euo pipefail
+          token=$(curl -sS             -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN"             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api%3A%2F%2FAzureADTokenExchange"             | jq -r '.value')
+          if [ -z "$token" ] || [ "$token" = "null" ]; then
+            echo "::error::no OIDC token issued; is id-token: write set?"
+            exit 1
+          fi
+          printf '%s' "$token" > "$RUNNER_TEMP/azure-federated-token"
+          {
+            echo "AZURE_FEDERATED_TOKEN_FILE=$RUNNER_TEMP/azure-federated-token"
+            echo "AZURE_TENANT_ID=${{ vars.AZURE_TENANT_ID }}"
+            echo "AZURE_CLIENT_ID=${{ vars.AZURE_CLIENT_ID_CI }}"
+          } >> "$GITHUB_ENV"
 
       - name: Migrate
         working-directory: apps/api
