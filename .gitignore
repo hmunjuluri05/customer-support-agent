@@ -284,6 +284,11 @@ yarn-error.log*
 *.swp
 .DS_Store
 
+# Recording notes for the walkthrough video. Useful to have beside the
+# project, but it is about presenting the work rather than part of it, and
+# docs/ is meant to hold the architecture document alone.
+docs/WALKTHROUGH.md
+
 # The assessment email itself. It is the hiring side's material and names the
 # candidate; the repo is meant to be shared with them, not to republish it.
 # Delete this line if you want it included.
