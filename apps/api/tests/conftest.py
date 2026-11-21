@@ -227,10 +227,17 @@ async def client(embeddings: AzureOpenAIEmbeddings) -> AsyncIterator[httpx.Async
     # refuses to send a Secure cookie over http -- so an http test client
     # silently never carries it, and anything relying on the cookie (such
     # as resuming a session) would fail for a reason that is not the code's.
+    started = datetime.now(UTC)
     async with httpx.AsyncClient(transport=transport, base_url="https://test") as c:
         yield c
 
+    # Scoped to this test's own sessions, by creation time.
+    #
+    # It used to be `delete(Session).where(token_hash.like("%"))` -- every
+    # session in the database. Harmless against a throwaway CI container, and
+    # destructive anywhere else: a local run points DATABASE_URL at a shared
+    # instance and silently deletes whatever conversations were live there.
     async with get_sessionmaker()() as db:
-        await db.execute(delete(Session).where(Session.token_hash.like("%")))
+        await db.execute(delete(Session).where(Session.created_at >= started))
         await _restore_invoices(db)
         await db.commit()
