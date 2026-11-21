@@ -21,14 +21,21 @@ on. The realtime provider is stubbed -- see tests.test_voice.
 from __future__ import annotations
 
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
 from sqlalchemy import select
 
+from support.agent.runner import TurnRunner
 from support.api.routes import _percentile
-from support.contracts.enums import Mode, TurnOutcome
+from support.contracts.enums import Mode, ToolName, TurnOutcome
+from support.providers.azure_openai import (
+    AzureOpenAIEmbeddings,
+    ChatTurn,
+    ToolCallRequest,
+    Usage,
+)
 from support.storage.models import Turn, TurnMetric
 from support.storage.session import get_sessionmaker
 from tests.voice_requests import GOOD_TOPIC, start_session, voice_call
@@ -286,3 +293,119 @@ def test_percentile_never_indexes_past_the_end() -> None:
         values = list(range(size))
         for quantile in (0.0, 0.5, 0.9, 0.95, 1.0):
             assert _percentile(values, quantile) in values
+
+
+# -------------------------------------------------------- prompt tracing --
+
+
+class _ScriptedChat:
+    """Verify, then answer. Enough to produce a two-call prompt trace."""
+
+    model = "scripted-chat"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, **_: object) -> ChatTurn:
+        self.calls += 1
+        usage = Usage(input_tokens=11, output_tokens=7)
+        if self.calls == 1:
+            return ChatTurn(
+                text="",
+                tool_calls=(
+                    ToolCallRequest(
+                        call_id="p0", name=ToolName.VERIFY_IDENTITY.value, arguments={}
+                    ),
+                ),
+                usage=usage,
+            )
+        return ChatTurn(text='{"answer": "All set.", "cited_refs": []}', tool_calls=(), usage=usage)
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def _chat_turn(session_id: Any) -> Turn:
+    async with get_sessionmaker()() as db:
+        turn = Turn(
+            session_id=session_id,
+            client_turn_id=f"pt-{uuid4().hex[:8]}",
+            mode=Mode.CHAT,
+            input_hash=uuid4().hex[:16],
+        )
+        db.add(turn)
+        await db.commit()
+
+        provider = AzureOpenAIEmbeddings()
+        try:
+            runner = TurnRunner(db, chat=_ScriptedChat(), embeddings=provider)
+            async for _ in runner.run(
+                turn=turn,
+                session_id=session_id,
+                user_text="Can you check my account?",
+                history=[],
+            ):
+                pass
+        finally:
+            await provider.aclose()
+        await db.commit()
+        return turn
+
+
+async def test_the_drawer_can_show_what_the_model_was_given(
+    client: httpx.AsyncClient,
+) -> None:
+    """ "Prompt traces" is a named requirement, and it is per call for a reason.
+
+    A tool-using loop's input grows: the second call carries the first call's
+    result. One combined "the prompt" would hide the only part worth seeing.
+    """
+    sid, headers = await start_session(client)
+    turn = await _chat_turn(UUID(sid))
+
+    response = await client.get(f"/api/sessions/{sid}/turns/{turn.id}/trace", headers=headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    steps = body["metrics"]["prompt"]
+    assert len(steps) == 2, "one entry per model call"
+    assert [step["call"] for step in steps] == [0, 1]
+
+    # The loop offers only what is legal in the current state, and the trace
+    # shows it. From INIT that is verification, retrieval (global policies
+    # only, unverified) and escalation -- a customer may ask for a human
+    # before anything else happens. The action is what must be absent: no
+    # refund tool exists to call before evidence has been gathered.
+    assert "execute_mock_refund" not in steps[0]["tools_offered"]
+    assert "verify_identity" in steps[0]["tools_offered"]
+
+    # The input grows, which is the thing this view exists to show.
+    assert len(steps[1]["messages"]) > len(steps[0]["messages"])
+    assert steps[0]["response"]["tool_calls"] == ["verify_identity"]
+    assert steps[1]["response"]["tool_calls"] == []
+
+    assert "customer support agent" in body["system_prompt"].lower()
+
+
+async def test_the_prompt_trace_carries_no_session_credential(
+    client: httpx.AsyncClient,
+) -> None:
+    """The trace is served to the browser, so it is a disclosure surface.
+
+    The session token authenticates every later request; a trace that echoed
+    it back would turn an observability panel into a credential leak.
+    """
+    sid, headers = await start_session(client)
+    token = headers["X-Session-Token"]
+    turn = await _chat_turn(UUID(sid))
+
+    response = await client.get(f"/api/sessions/{sid}/turns/{turn.id}/trace", headers=headers)
+    raw = response.text
+
+    assert token not in raw
+    assert "token_hash" not in raw
+    # Previews are bounded, so a trace cannot become a second copy of the
+    # transcript sitting in the database.
+    for step in response.json()["metrics"]["prompt"]:
+        for message in step["messages"]:
+            assert len(message["preview"]) <= 243

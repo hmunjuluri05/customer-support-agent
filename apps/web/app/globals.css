@@ -1041,3 +1041,59 @@ button:disabled {
   flex-wrap: wrap;
   gap: 8px;
 }
+
+/* --------------------------------------------------------- prompt trace -- */
+
+.prompt-step {
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin-top: 8px;
+}
+
+.prompt-msg {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.prompt-role {
+  flex: 0 0 62px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+  padding-top: 1px;
+}
+
+.prompt-role.user {
+  color: var(--accent);
+}
+
+.prompt-role.response {
+  color: var(--good);
+}
+
+.prompt-body {
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.prompt-system {
+  margin: 8px 0 0;
+  padding: 10px;
+  max-height: 260px;
+  overflow: auto;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+}

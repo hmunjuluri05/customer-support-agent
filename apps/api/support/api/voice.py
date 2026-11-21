@@ -40,8 +40,9 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from support.agent.prompts import SYSTEM_PROMPT
 from support.agent.runner import tool_result_for_model
-from support.agent.voice import session_config
+from support.agent.voice import VOICE_ADDENDUM, session_config
 from support.api.deps import authorise_session, client_ip, get_db, settings_dep
 from support.config import Settings
 from support.contracts.enums import (
@@ -299,6 +300,7 @@ async def _finalise_voice_turn(db: AsyncSession, turn: Turn, *, settings: Settin
         for run in runs
     ]
 
+    instructions = SYSTEM_PROMPT + VOICE_ADDENDUM
     evidence = await load_evidence(db, turn.evidence)
     receipts = (
         await db.execute(select(Refund.id).where(Refund.turn_id == turn.id).limit(1))
@@ -334,6 +336,30 @@ async def _finalise_voice_turn(db: AsyncSession, turn: Turn, *, settings: Settin
             top_similarity=evidence.top_similarity if evidence is not None else None,
             waterfall={
                 "steps": steps,
+                # A spoken turn has no per-call prompt: the instructions and the
+                # tool list are pinned once, server-side, when the realtime
+                # session is minted, and the browser cannot change either. That
+                # is the property worth showing in the drawer, so it is recorded
+                # as the prompt trace rather than leaving the panel empty.
+                "prompt": [
+                    {
+                        "call": 0,
+                        "tools_offered": sorted(tool.value for tool in ToolName),
+                        "messages": [
+                            {
+                                "role": "system",
+                                "chars": len(instructions),
+                                "preview": " ".join(instructions.split())[:240] + "...",
+                                "tool_calls": [],
+                            }
+                        ],
+                        "response": None,
+                        "note": (
+                            "Pinned server-side at session mint; one instruction set for "
+                            "the whole call, not per turn."
+                        ),
+                    }
+                ],
                 "citations": (sorted(evidence.citation_keys()) if evidence is not None else []),
                 "grounding": (
                     {

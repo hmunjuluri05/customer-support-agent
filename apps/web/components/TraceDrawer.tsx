@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
+import { useState } from 'react';
 
-import type { TraceMetrics, TurnTrace, WaterfallStep } from '@/lib/client';
+import type { PromptStep, TraceMetrics, TurnTrace, WaterfallStep } from '@/lib/client';
 import {
   GROUNDING_LABELS,
   OUTCOME_LABELS,
@@ -150,6 +151,11 @@ function TraceBody({ trace }: { trace: TurnTrace }) {
           </div>
         </>
       )}
+
+      <div className="drawer-section">
+        <div className="section-label">Prompt trace</div>
+        <PromptTrace steps={trace.prompt ?? []} systemPrompt={trace.system_prompt ?? ''} />
+      </div>
 
       <div className="drawer-section">
         <div className="section-label">Tool calls ({trace.tool_runs.length})</div>
@@ -331,6 +337,86 @@ function GroundingScale({ metrics }: { metrics: TraceMetrics }) {
           This turn predates per-turn threshold recording, so τ above is the value currently
           configured, not necessarily the one this decision was taken under.
         </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * What the model was given, per call.
+ *
+ * Recorded per call rather than once per turn, because the interesting part of
+ * a tool-using loop is how the input grows: the second call carries the first
+ * call's result, and the call that finally answers carries the policy
+ * evidence. One combined "the prompt" would hide exactly that.
+ *
+ * Message bodies are previews. Everything shown is already visible to this
+ * customer in their own transcript, and the verification code never enters
+ * model context at all, so it cannot appear here.
+ */
+function PromptTrace({ steps, systemPrompt }: { steps: PromptStep[]; systemPrompt: string }) {
+  const [showSystem, setShowSystem] = useState(false);
+
+  if (steps.length === 0) {
+    return (
+      <div className="hint">
+        No prompt trace for this turn. Turns recorded before this was captured have none.
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {steps.map((step) => (
+        <div className="prompt-step" key={step.call}>
+          <div className="run-head">
+            <span className="run-index mono">call #{step.call}</span>
+            <span className="dim">tools offered:</span>
+            <span className="mono">{step.tools_offered.join(', ') || 'none'}</span>
+          </div>
+
+          {step.messages.map((message, index) => (
+            <div className="prompt-msg" key={`${step.call}-${index}`}>
+              <span className={`prompt-role ${message.role}`}>{message.role}</span>
+              <span className="prompt-body">
+                {message.tool_calls.length > 0 ? (
+                  <em>requested {message.tool_calls.join(', ')}</em>
+                ) : (
+                  message.preview || <em>(empty)</em>
+                )}
+                <span className="dim"> · {message.chars} chars</span>
+              </span>
+            </div>
+          ))}
+
+          {step.response !== null && (
+            <div className="prompt-msg">
+              <span className="prompt-role response">reply</span>
+              <span className="prompt-body">
+                {step.response.tool_calls.length > 0 ? (
+                  <em>called {step.response.tool_calls.join(', ')}</em>
+                ) : (
+                  step.response.preview || <em>(no text)</em>
+                )}
+                <span className="dim">
+                  {' '}
+                  · {step.response.tokens_in ?? '--'} in / {step.response.tokens_out ?? '--'} out
+                </span>
+              </span>
+            </div>
+          )}
+
+          {step.note !== undefined && <div className="hint">{step.note}</div>}
+        </div>
+      ))}
+
+      {systemPrompt.length > 0 && (
+        <>
+          <button type="button" className="btn small" onClick={() => setShowSystem((v) => !v)}>
+            {showSystem ? 'Hide' : 'Show'} system prompt ({systemPrompt.length} chars)
+          </button>
+          {showSystem && <pre className="prompt-system">{systemPrompt}</pre>}
+        </>
       )}
     </>
   );

@@ -116,6 +116,7 @@ class _Accumulator:
     tool_calls: int = 0
     ttft_ms: int | None = None
     waterfall: list[dict[str, Any]] = field(default_factory=list)
+    prompt_steps: list[dict[str, Any]] = field(default_factory=list)
 
     def add(self, usage: Usage) -> None:
         self.usage_in += usage.input_tokens or 0
@@ -181,6 +182,9 @@ class TurnRunner:
             async with asyncio.timeout(self._settings.turn_budget_s):
                 for _ in range(self._settings.max_tool_calls_per_turn + 1):
                     available = self._executor.available_tools(ctx)
+                    acc.prompt_steps.append(
+                        _prompt_step(len(acc.prompt_steps), messages, available)
+                    )
                     response = await self._complete(
                         ctx,
                         messages=messages,
@@ -188,6 +192,7 @@ class TurnRunner:
                         deadline=deadline,
                     )
                     acc.add(response.usage)
+                    _record_response(acc.prompt_steps[-1], response)
 
                     if not response.tool_calls:
                         final_text, cited_refs = _parse_reply(response.text)
@@ -704,6 +709,10 @@ class TurnRunner:
                 top_similarity=ctx.evidence.top_similarity if ctx.evidence else None,
                 waterfall={
                     "steps": acc.waterfall,
+                    # The prompt trace lives beside the timing trace: both
+                    # answer "what actually happened in this turn", and both
+                    # are read by the same drawer.
+                    "prompt": acc.prompt_steps,
                     "citations": [c.chunk_id for c in citations],
                     # Recorded per turn rather than read from config when the
                     # drawer renders: retuning the threshold must not silently
@@ -835,6 +844,66 @@ def _parse_reply(raw: str) -> tuple[str, list[int]]:
         # customer; prefer recovering prose over releasing nothing.
         return _prose_fallback(text)
     return answer, refs
+
+
+# How much of each message the trace keeps. Enough to see what the model was
+# actually working from, short enough that a trace is not a second copy of the
+# transcript sitting in the database.
+_PROMPT_PREVIEW_CHARS = 240
+
+
+def _prompt_step(
+    index: int, messages: list[dict[str, Any]], available: frozenset[ToolName]
+) -> dict[str, Any]:
+    """What this model call is about to be given.
+
+    Recorded per call rather than once per turn, because the interesting part
+    of a tool-using loop is how the input grows: the second call carries the
+    first call's result, and the call that finally answers carries the policy
+    evidence. A single "the prompt" would hide exactly that.
+
+    Message bodies are previewed, not stored whole. Everything here is already
+    visible to this customer in their own transcript -- the system prompt is
+    static, the user text is theirs, and tool results reach the trace already
+    redacted by the executor. The verification code never enters model context
+    in the first place, so it cannot appear here.
+    """
+    return {
+        "call": index,
+        "tools_offered": sorted(tool.value for tool in available),
+        "messages": [
+            {
+                "role": str(message.get("role", "?")),
+                "chars": len(str(message.get("content") or "")),
+                "preview": _preview(str(message.get("content") or "")),
+                # The assistant turn that requested tools has no content, so
+                # name them or the step reads as an empty message.
+                "tool_calls": [
+                    str(call.get("function", {}).get("name", "?"))
+                    for call in message.get("tool_calls") or []
+                ],
+            }
+            for message in messages
+        ],
+    }
+
+
+def _record_response(step: dict[str, Any], response: ChatTurn) -> None:
+    """What came back, attached to the call that asked for it."""
+    step["response"] = {
+        "tool_calls": [call.name for call in response.tool_calls],
+        "text_chars": len(response.text or ""),
+        "preview": _preview(response.text or ""),
+        "tokens_in": response.usage.input_tokens,
+        "tokens_out": response.usage.output_tokens,
+    }
+
+
+def _preview(text: str) -> str:
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= _PROMPT_PREVIEW_CHARS:
+        return collapsed
+    return collapsed[:_PROMPT_PREVIEW_CHARS] + "..."
 
 
 def _maybe_inject_llm(ctx: TurnContext, settings: Settings) -> None:

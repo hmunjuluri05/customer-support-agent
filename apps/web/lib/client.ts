@@ -166,6 +166,29 @@ export interface TraceDetail {
   grounding?: { threshold: number; weak_margin: number } | null;
 }
 
+/** One message as the model received it. Bodies are previews, not transcripts. */
+export interface PromptMessage {
+  role: string;
+  chars: number;
+  preview: string;
+  tool_calls: string[];
+}
+
+/** One model call: what went in, and what came back. */
+export interface PromptStep {
+  call: number;
+  tools_offered: string[];
+  messages: PromptMessage[];
+  response: {
+    tool_calls: string[];
+    text_chars: number;
+    preview: string;
+    tokens_in: number | null;
+    tokens_out: number | null;
+  } | null;
+  note?: string;
+}
+
 export interface TraceMetrics {
   ttft_ms: number | null;
   total_ms: number | null;
@@ -192,6 +215,10 @@ export interface TurnTrace {
   outcome: TurnOutcome | null;
   tool_runs: TraceToolRun[];
   metrics: TraceMetrics | null;
+  /** Per model call, in order. Empty for a turn recorded before this existed. */
+  prompt: PromptStep[];
+  /** Static instructions every turn runs under. Carries no customer data. */
+  system_prompt: string;
 }
 
 export async function fetchTrace(

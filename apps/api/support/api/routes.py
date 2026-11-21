@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from support.agent.prompts import SYSTEM_PROMPT
 from support.agent.runner import TurnRunner
 from support.api.deps import (
     SESSION_COOKIE,
@@ -491,6 +492,7 @@ async def get_trace(
     # though the old decision had been measured against it.
     detail = metric.waterfall if metric and isinstance(metric.waterfall, dict) else {}
     recorded = detail.get("grounding") if isinstance(detail.get("grounding"), dict) else None
+    prompt_steps = detail.get("prompt") if isinstance(detail.get("prompt"), list) else []
 
     return JSONResponse(
         {
@@ -498,6 +500,10 @@ async def get_trace(
             "mode": turn.mode.value,
             "status": turn.status.value,
             "outcome": turn.outcome.value if turn.outcome else None,
+            # Static, identical for every turn, and carried here so the drawer
+            # can show the instructions the guardrails are written into without
+            # a second round trip. It contains no customer data.
+            "system_prompt": SYSTEM_PROMPT,
             "tool_runs": [
                 {
                     "tool": r.tool.value,
@@ -533,6 +539,10 @@ async def get_trace(
                     ),
                     "grounding_threshold_recorded": recorded is not None,
                     "waterfall": metric.waterfall,
+                    # What the model was actually given, per call. Message
+                    # bodies are previews: the trace is a window onto the turn,
+                    # not a second copy of the transcript.
+                    "prompt": prompt_steps,
                 }
                 if metric
                 else None
