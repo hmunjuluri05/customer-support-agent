@@ -1097,3 +1097,17 @@ button:disabled {
   color: var(--text-dim);
   white-space: pre-wrap;
 }
+
+/* ------------------------------------------------------------ resume card -- */
+
+.resume-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  justify-content: space-between;
+  margin-bottom: 18px;
+  padding: 14px 16px;
+  background: var(--accent-dim);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: var(--radius);
+}

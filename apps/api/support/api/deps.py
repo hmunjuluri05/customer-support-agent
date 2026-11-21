@@ -67,12 +67,20 @@ async def authorise_session(
 ) -> Session:
     """Resolve and authorise the session named in the path.
 
-    The token is accepted from a cookie (browser) or a header (tests, curl).
-    A token that does not match the requested session is rejected with 404
-    rather than 403, so the endpoint does not confirm that another session
-    exists.
+    The token is accepted from a header (tests, curl, the web client) or a
+    cookie (a browser that has lost its token, after a restart). A token that
+    does not match the requested session is rejected with 404 rather than 403,
+    so the endpoint does not confirm that another session exists.
+
+    **Header first.** The header is an explicit credential; the cookie is
+    ambient authority the browser attaches to every request. Preferring the
+    cookie means a caller presenting a deliberate credential gets a different
+    one used instead -- so a request carrying another session's token would be
+    authorised as the cookie's session rather than refused. Three isolation
+    tests only passed because the test client was on http and never sent the
+    Secure cookie at all; making them realistic exposed the ordering.
     """
-    token = cookie_token or header_token
+    token = header_token or cookie_token
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

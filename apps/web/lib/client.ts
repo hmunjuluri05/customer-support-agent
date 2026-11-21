@@ -17,6 +17,7 @@ import {
   type FaultKind,
   type GroundingDecision,
   type Mode,
+  type SessionAccount,
   type SessionSnapshot,
   type StreamEvent,
   type ToolName,
@@ -26,11 +27,16 @@ import { ApiError, parseFrames, toApiError } from './sse';
 
 export interface Credentials {
   sessionId: string;
-  token: string;
+  /**
+   * Null for a session resumed from the httpOnly cookie after a browser
+   * restart. The cookie is the credential there and the server accepts it, so
+   * the token never has to be handed back to JavaScript to make resume work.
+   */
+  token: string | null;
 }
 
 function authHeaders(credentials: Credentials): HeadersInit {
-  return { 'X-Session-Token': credentials.token };
+  return credentials.token === null ? {} : { 'X-Session-Token': credentials.token };
 }
 
 async function expectOk(response: Response): Promise<Response> {
@@ -60,6 +66,31 @@ export async function createSession(accountSlug: string | null): Promise<Created
     }),
   );
   return (await response.json()) as CreatedSession;
+}
+
+/** A live session this browser still holds a cookie for, if any. */
+export interface ResumableSession {
+  session_id: string;
+  account: SessionAccount | null;
+  messages: number;
+  last_activity: string | null;
+  expires_at: string;
+}
+
+export async function fetchResumable(): Promise<ResumableSession | null> {
+  try {
+    const response = await fetch('/api/sessions/current', {
+      credentials: 'include',
+      cache: 'no-store',
+    });
+    if (!response.ok) return null;
+    const body = (await response.json()) as { session: ResumableSession | null };
+    return body.session;
+  } catch {
+    // Offering to resume is a convenience. If the lookup fails the picker
+    // still works, which is the behaviour that must not break.
+    return null;
+  }
 }
 
 export async function fetchSnapshot(credentials: Credentials): Promise<SessionSnapshot> {
@@ -319,8 +350,11 @@ export function loadCredentials(): Credentials | null {
     const raw = window.sessionStorage.getItem(STORAGE_KEY);
     if (raw === null) return null;
     const parsed = JSON.parse(raw) as Partial<Credentials>;
-    if (typeof parsed.sessionId !== 'string' || typeof parsed.token !== 'string') return null;
-    return { sessionId: parsed.sessionId, token: parsed.token };
+    if (typeof parsed.sessionId !== 'string') return null;
+    return {
+      sessionId: parsed.sessionId,
+      token: typeof parsed.token === 'string' ? parsed.token : null,
+    };
   } catch {
     return null;
   }

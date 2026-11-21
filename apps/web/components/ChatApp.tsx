@@ -4,12 +4,14 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'r
 
 import {
   type Credentials,
+  type ResumableSession,
   type SessionMetrics,
   type TurnTrace,
   clearCredentials,
   createSession,
   cancelTurn,
   fetchAccounts,
+  fetchResumable,
   fetchSessionMetrics,
   fetchSnapshot,
   fetchTrace,
@@ -42,6 +44,7 @@ export function ChatApp() {
   const [credentials, setCredentials] = useState<Credentials | null>(null);
   const [account, setAccount] = useState<SessionAccount | null>(null);
   const [signingIn, setSigningIn] = useState(false);
+  const [resumable, setResumable] = useState<ResumableSession | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [chat, dispatch] = useReducer(reduce, initialState);
@@ -119,7 +122,13 @@ export function ChatApp() {
       await loadAccounts();
       const stored = loadCredentials();
       if (stored === null) {
-        if (!cancelled) setPhase('picking');
+        // No credential in this tab. The browser may still hold the httpOnly
+        // cookie from a session closed earlier, so offer that rather than
+        // resuming it silently -- see AccountPicker.
+        const previous = await fetchResumable();
+        if (cancelled) return;
+        setResumable(previous);
+        setPhase('picking');
         return;
       }
       try {
@@ -173,6 +182,40 @@ export function ChatApp() {
       setSigningIn(false);
     }
   }, []);
+
+  /**
+   * Rejoin the session the cookie still points at.
+   *
+   * No token: the cookie is the credential and the server accepts it, so a
+   * resumed session never puts a bearer token into JavaScript that the browser
+   * did not already have.
+   */
+  const resume = useCallback(async () => {
+    if (resumable === null) return;
+    setSigningIn(true);
+    setAccountsError(null);
+    const credentials: Credentials = { sessionId: resumable.session_id, token: null };
+    try {
+      const snapshot = await fetchSnapshot(credentials);
+      saveCredentials(credentials);
+      setCredentials(credentials);
+      setAccount(snapshot.account);
+      dispatch({ kind: 'restore', snapshot });
+      setPhase('chatting');
+      setResumable(null);
+      void refreshMetrics(credentials);
+    } catch (error) {
+      // Expired between the offer and the click, most likely.
+      setAccountsError(
+        error instanceof Error
+          ? `That session could not be resumed: ${error.message}`
+          : String(error),
+      );
+      setResumable(null);
+    } finally {
+      setSigningIn(false);
+    }
+  }, [refreshMetrics, resumable]);
 
   const submit = useCallback(
     async (text: string, mode: Mode = 'chat') => {
@@ -414,6 +457,9 @@ export function ChatApp() {
     setSessionMetrics(null);
     setInspecting(null);
     setTrace(null);
+    // Asking for a new session is an answer to the resume question, so do not
+    // then offer to resume the one just abandoned.
+    setResumable(null);
     dispatch({ kind: 'clear' });
     setPhase('picking');
   }, []);
@@ -461,7 +507,9 @@ export function ChatApp() {
           accounts={accounts}
           busy={signingIn}
           error={accountsError}
+          resumable={resumable}
           onPick={(slug) => void signIn(slug)}
+          onResume={() => void resume()}
           onRetry={() => void loadAccounts()}
         />
       )}

@@ -76,7 +76,12 @@ async def test_connect_pins_instructions_and_tools_server_side(client: httpx.Asy
 
 
 async def test_connect_requires_the_session_credential(client: httpx.AsyncClient) -> None:
+    """Neither header nor cookie. Creating the session set the cookie, and the
+    cookie is a credential -- it is what lets a browser resume after a
+    restart -- so it has to be cleared for this to test anything."""
     sid, _ = await start_session(client)
+    client.cookies.clear()
+
     response = await client.post(
         f"/api/sessions/{sid}/voice/connect",
         json={"sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"},

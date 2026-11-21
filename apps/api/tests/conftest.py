@@ -223,7 +223,11 @@ async def client(embeddings: AzureOpenAIEmbeddings) -> AsyncIterator[httpx.Async
     )
 
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    # https, not http: the session cookie is Secure, and httpx correctly
+    # refuses to send a Secure cookie over http -- so an http test client
+    # silently never carries it, and anything relying on the cookie (such
+    # as resuming a session) would fail for a reason that is not the code's.
+    async with httpx.AsyncClient(transport=transport, base_url="https://test") as c:
         yield c
 
     async with get_sessionmaker()() as db:

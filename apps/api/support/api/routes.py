@@ -8,10 +8,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +22,7 @@ from support.api.deps import (
     authorise_session,
     client_ip,
     get_db,
+    hash_token,
     new_token,
     settings_dep,
 )
@@ -179,6 +180,82 @@ async def create_session(
             else None
         ),
         expires_at=row.expires_at,
+    )
+
+
+@router.get("/sessions/current")
+async def get_current_session(
+    db: AsyncSession = Depends(get_db),
+    cookie_token: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> JSONResponse:
+    """The session this browser already holds a cookie for, if it is still live.
+
+    Declared before `/sessions/{session_id}` so "current" is not parsed as a
+    UUID path parameter.
+
+    Closing a browser does not end a session here: the row, its transcript and
+    its receipts live for `session_ttl_s`, and the cookie is set with a
+    matching max-age, so both survive a restart. What does not survive is
+    sessionStorage, which held the session *id* -- so the session was still
+    there and reachable, and the browser simply could not find its way back to
+    it. This endpoint is that way back.
+
+    **It returns no token.** The cookie is httpOnly and stays that way: the
+    client resumes by calling the normal endpoints with `credentials:
+    "include"` and no `X-Session-Token` header, which `authorise_session`
+    already accepts. Handing the token back to JavaScript would mean an XSS
+    after a browser restart could steal a credential that, today, is not
+    reachable from script at all.
+
+    Answers for the caller's own cookie only, so it cannot be used to discover
+    that some other session exists.
+    """
+    if not cookie_token:
+        return JSONResponse({"session": None})
+
+    row = (
+        await db.execute(select(Session).where(Session.token_hash == hash_token(cookie_token)))
+    ).scalar_one_or_none()
+
+    if row is None or row.expires_at <= datetime.now(UTC):
+        return JSONResponse({"session": None})
+
+    account = None
+    if row.demo_account_id:
+        acct = (
+            await db.execute(select(DemoAccount).where(DemoAccount.id == row.demo_account_id))
+        ).scalar_one_or_none()
+        if acct is not None:
+            account = {
+                "slug": acct.slug,
+                "label": acct.label,
+                "tier": acct.tier.value,
+                "contract_status": acct.contract_status.value,
+            }
+
+    messages = (
+        await db.execute(select(func.count(Message.id)).where(Message.session_id == row.id))
+    ).scalar_one()
+
+    last = (
+        await db.execute(select(func.max(Message.created_at)).where(Message.session_id == row.id))
+    ).scalar_one()
+
+    # An empty session is not worth offering to resume: the customer would be
+    # choosing between a blank transcript and a blank transcript.
+    if messages == 0:
+        return JSONResponse({"session": None})
+
+    return JSONResponse(
+        {
+            "session": {
+                "session_id": str(row.id),
+                "account": account,
+                "messages": messages,
+                "last_activity": last.isoformat() if last else None,
+                "expires_at": row.expires_at.isoformat(),
+            }
+        }
     )
 
 

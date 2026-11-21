@@ -1,5 +1,6 @@
 'use client';
 
+import type { ResumableSession } from '@/lib/client';
 import type { DemoAccount } from '@/lib/events';
 import { money } from '@/lib/format';
 
@@ -11,27 +12,60 @@ import { money } from '@/lib/format';
  * in a chat message can change it, which is what makes the cross-account
  * refund probe fail server-side instead of relying on the model to refuse.
  */
+/** Coarse on purpose: a session lives four hours, so minutes are enough. */
+function ago(iso: string): string {
+  const minutes = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+}
+
 export function AccountPicker({
   accounts,
   busy,
   error,
+  resumable,
   onPick,
+  onResume,
   onRetry,
 }: {
   accounts: DemoAccount[];
   busy: boolean;
   error: string | null;
+  /** A live session this browser still holds a cookie for, or null. */
+  resumable: ResumableSession | null;
   onPick: (slug: string) => void;
+  onResume: () => void;
   onRetry: () => void;
 }) {
   return (
     <div className="picker">
       <div className="picker-inner">
-        <h2>Sign in as a demo customer</h2>
+        <h2>{resumable === null ? 'Sign in as a demo customer' : 'Resume, or start fresh'}</h2>
         <p className="lede">
           Three synthetic accounts, chosen so the same request — a $15.00 refund on a $40.00
           invoice — produces a different, correctly-cited outcome on each.
         </p>
+
+        {/* Offered, never automatic. Closing a browser is a reasonable way to
+            mean "I am done", and a shared machine must not drop the next
+            person into the previous one's transcript. */}
+        {resumable !== null && (
+          <div className="resume-card">
+            <div>
+              <strong>Resume your previous session</strong>
+              <div className="invoice-note">
+                {resumable.account?.label ?? 'No account bound'} · {resumable.messages} message
+                {resumable.messages === 1 ? '' : 's'}
+                {resumable.last_activity !== null && ` · last active ${ago(resumable.last_activity)}`}
+              </div>
+            </div>
+            <button type="button" className="btn primary" disabled={busy} onClick={onResume}>
+              Resume
+            </button>
+          </div>
+        )}
 
         {error !== null && (
           <div className="error-box" style={{ marginBottom: 16 }}>

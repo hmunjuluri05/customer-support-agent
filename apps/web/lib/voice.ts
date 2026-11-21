@@ -190,7 +190,7 @@ export class VoiceSession {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Session-Token': this.credentials.token,
+          ...this.authHeaders(),
         },
         credentials: 'include',
         body: JSON.stringify({ sdp: localSdp }),
@@ -346,7 +346,7 @@ export class VoiceSession {
   private async adoptInFlightTurn(): Promise<void> {
     try {
       const response = await fetch(`/api/sessions/${this.credentials.sessionId}/voice/state`, {
-        headers: { 'X-Session-Token': this.credentials.token },
+        headers: this.authHeaders(),
         credentials: 'include',
         cache: 'no-store',
       });
@@ -410,7 +410,7 @@ export class VoiceSession {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Session-Token': this.credentials.token,
+          ...this.authHeaders(),
         },
         credentials: 'include',
         body: JSON.stringify({
@@ -442,6 +442,19 @@ export class VoiceSession {
     this.send({ type: 'response.create' });
   }
 
+  /**
+   * Auth headers for the voice endpoints.
+   *
+   * A session resumed from the httpOnly cookie has no token in JavaScript, and
+   * does not need one: every request below sends `credentials: 'include'`, and
+   * the server accepts the cookie.
+   */
+  private authHeaders(): Record<string, string> {
+    return this.credentials.token === null
+      ? {}
+      : { 'X-Session-Token': this.credentials.token };
+  }
+
   private send(payload: Record<string, unknown>): void {
     if (this.channel?.readyState !== 'open') return;
     this.channel.send(JSON.stringify(payload));
@@ -458,7 +471,7 @@ export class VoiceSession {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Session-Token': this.credentials.token,
+          ...this.authHeaders(),
         },
         credentials: 'include',
         body: JSON.stringify({

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import httpx
 import pytest_asyncio
@@ -83,7 +85,11 @@ async def client() -> AsyncIterator[httpx.AsyncClient]:
     )
 
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    # https, not http: the session cookie is Secure, and httpx correctly
+    # refuses to send a Secure cookie over http -- so an http test client
+    # silently never carries it, and anything relying on the cookie (such
+    # as resuming a session) would fail for a reason that is not the code's.
+    async with httpx.AsyncClient(transport=transport, base_url="https://test") as c:
         yield c
 
     # Remove sessions created during the test.
@@ -179,8 +185,18 @@ async def test_extra_fields_rejected(client: httpx.AsyncClient) -> None:
 
 
 async def test_no_credential_is_unauthorised(client: httpx.AsyncClient) -> None:
+    """No header AND no cookie. Both have to be gone for this to mean anything.
+
+    Creating a session sets the cookie, which is itself a credential -- that is
+    what lets a browser resume after a restart. So the cookie jar is emptied
+    here, or the request is not actually unauthenticated and the test asserts
+    nothing.
+    """
     session_id, _ = await _make_session(client)
+    client.cookies.clear()
+
     response = await client.get(f"/api/sessions/{session_id}")
+
     assert response.status_code == 401
 
 
@@ -370,3 +386,101 @@ async def test_same_turn_id_different_text_is_conflict(client: httpx.AsyncClient
     )
     assert response.status_code == 409
     assert response.json()["detail"]["error_code"] == "client_turn_id_reused_with_different_input"
+
+
+# ------------------------------------------------------------ resumption --
+
+
+async def test_no_cookie_means_nothing_to_resume(client: httpx.AsyncClient) -> None:
+    response = await client.get("/api/sessions/current")
+    assert response.status_code == 200
+    assert response.json()["session"] is None
+
+
+async def test_a_browser_can_find_its_way_back_to_its_session(
+    client: httpx.AsyncClient,
+) -> None:
+    """Closing a browser does not end a session, it only loses the id.
+
+    sessionStorage holds the session id and dies with the tab; the httpOnly
+    cookie and the session row both outlive it. Without this endpoint the
+    transcript is still sitting in the database, reachable, and the browser
+    simply cannot name it.
+    """
+    created = await client.post("/api/sessions", json={"account_slug": "premium-active"})
+    sid = created.json()["session_id"]
+    token = created.json()["session_token"]
+
+    # Say something, so there is a transcript worth coming back to.
+    await client.post(
+        f"/api/sessions/{sid}/turns",
+        headers={"X-Session-Token": token},
+        json={"client_turn_id": "resume-1", "text": "Hello there.", "mode": "chat"},
+    )
+
+    # The cookie rides on the client; the header is what a closed tab loses.
+    response = await client.get("/api/sessions/current")
+    assert response.status_code == 200
+    session = response.json()["session"]
+    assert session is not None
+    assert session["session_id"] == sid
+    assert session["account"]["slug"] == "premium-active"
+    assert session["messages"] >= 1
+
+    # And the cookie alone is enough to read it back: resuming never needs the
+    # token handed to JavaScript.
+    snapshot = await client.get(f"/api/sessions/{sid}")
+    assert snapshot.status_code == 200
+    assert len(snapshot.json()["messages"]) >= 1
+
+
+async def test_an_empty_session_is_not_offered(client: httpx.AsyncClient) -> None:
+    """Resuming a blank transcript is a choice between nothing and nothing."""
+    await client.post("/api/sessions", json={"account_slug": "premium-active"})
+
+    assert (await client.get("/api/sessions/current")).json()["session"] is None
+
+
+async def test_resumption_answers_only_for_the_callers_own_cookie(
+    client: httpx.AsyncClient,
+) -> None:
+    """It must not become a way to discover that someone else's session exists."""
+    first = await client.post("/api/sessions", json={"account_slug": "premium-active"})
+    first_id = first.json()["session_id"]
+    await client.post(
+        f"/api/sessions/{first_id}/turns",
+        headers={"X-Session-Token": first.json()["session_token"]},
+        json={"client_turn_id": "r-1", "text": "First session.", "mode": "chat"},
+    )
+
+    # A second sign-in replaces the cookie, as a new visitor's browser would.
+    second = await client.post("/api/sessions", json={"account_slug": "basic-active"})
+    second_id = second.json()["session_id"]
+    await client.post(
+        f"/api/sessions/{second_id}/turns",
+        headers={"X-Session-Token": second.json()["session_token"]},
+        json={"client_turn_id": "r-2", "text": "Second session.", "mode": "chat"},
+    )
+
+    session = (await client.get("/api/sessions/current")).json()["session"]
+    assert session["session_id"] == second_id, "the cookie names one session, the current one"
+    assert session["session_id"] != first_id
+
+
+async def test_an_expired_session_is_not_offered(client: httpx.AsyncClient) -> None:
+    """The row outlives the credential. Expiry must end the offer, not the data."""
+    created = await client.post("/api/sessions", json={"account_slug": "premium-active"})
+    sid = created.json()["session_id"]
+    await client.post(
+        f"/api/sessions/{sid}/turns",
+        headers={"X-Session-Token": created.json()["session_token"]},
+        json={"client_turn_id": "exp-1", "text": "Still here?", "mode": "chat"},
+    )
+    assert (await client.get("/api/sessions/current")).json()["session"] is not None
+
+    async with get_sessionmaker()() as db:
+        row = (await db.execute(select(Session).where(Session.id == UUID(sid)))).scalar_one()
+        row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        await db.commit()
+
+    assert (await client.get("/api/sessions/current")).json()["session"] is None
