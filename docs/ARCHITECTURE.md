@@ -151,12 +151,19 @@ flowchart TD
     d -->|"below that"| u["UNSUPPORTED"]
     g --> act["May state policy<br/>May act"]
     w --> clar["Clarifying question<br/>No action"]
-    u --> esc["Escalate<br/>No claim"]
+    u --> esc["Ticket raised<br/>No claim"]
 
     style g fill:#064e3b,stroke:#34d399,color:#e5e7eb
     style w fill:#451a03,stroke:#f59e0b,color:#e5e7eb
     style u fill:#450a0a,stroke:#f87171,color:#e5e7eb
 ```
+
+**UNSUPPORTED always reaches a human.** If retrieval clears nothing and the
+model does not raise an escalation itself, the runner raises one through the
+executor — guarded, audited and idempotent like any other action, with reason
+`insufficient_evidence`, because what the server can attest is that retrieval
+ran and nothing met the threshold. Leaving it to the model produced turns
+recorded as escalations with no ticket behind them.
 
 Filtering before ranking is what makes tier leakage structurally impossible
 rather than statistically unlikely. Similarity is stated as
