@@ -210,3 +210,45 @@ async def test_ineligible_reason_denied(basic_session) -> None:
         )
 
     assert exc.value.reason is DenialReason.INELIGIBLE_REASON
+
+
+async def test_the_losing_caller_recovers_the_winners_receipt(premium_session, monkeypatch) -> None:
+    """The loser's branch, reached deterministically rather than by racing.
+
+    `test_concurrent_same_intent_commits_once` only enters this branch when
+    two callers genuinely interleave. Against a database a network away they
+    usually do not: the second caller's pre-flight lookup finds the first
+    caller's row and takes the happy path, so the branch goes unexercised and
+    the suite stays green. CI, with Postgres in the same container, collided
+    for real on the first run and found the recovery broken -- it called
+    `db.rollback()` inside `async with session.begin()`, which SQLAlchemy
+    refuses, so the loser raised instead of recovering.
+
+    Blinding the pre-flight lookup once reproduces exactly that collision on
+    any machine: the second caller believes nothing exists, writes, loses on
+    the unique constraint, and must recover.
+    """
+    first = await _refund(premium_session.id, invoice_ref="INV-1001", amount_minor=1500)
+
+    import support.tools.refund as refund_module
+
+    real_find_existing = refund_module._find_existing
+    blinded = {"used": False}
+
+    async def find_existing_missing_once(db, intent_id):
+        if not blinded["used"]:
+            blinded["used"] = True
+            return None
+        return await real_find_existing(db, intent_id)
+
+    monkeypatch.setattr(refund_module, "_find_existing", find_existing_missing_once)
+
+    second = await _refund(premium_session.id, invoice_ref="INV-1001", amount_minor=1500)
+
+    assert blinded["used"], "the pre-flight lookup was never blinded"
+    assert second.receipt_ref == first.receipt_ref
+    assert second.idempotent_replay is True
+    # The money is the point: the loser's balance increment was rolled back
+    # with its savepoint, so the invoice moved exactly once.
+    assert await _refunded_minor("INV-1001") == 1500
+    assert await _count_refunds(first.intent_id) == 1

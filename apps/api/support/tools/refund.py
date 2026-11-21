@@ -30,12 +30,12 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from support.contracts.enums import ContractStatus, DenialReason
 from support.storage.models import DemoAccount, Invoice, Refund, Session
-from support.tools.errors import ActionDenied
+from support.tools.errors import ActionDenied, ProviderUnavailable
 from support.tools.rules import RefundRule, active_refund_rule
 
 
@@ -223,34 +223,53 @@ async def execute_mock_refund(
         reason=reason,
     )
 
-    # 4. Commit the balance change and the receipt together.
-    invoice.refunded_minor += amount_minor
-    receipt = Refund(
-        intent_id=intent_id,
-        receipt_ref=_receipt_ref(),
-        session_id=session_id,
-        turn_id=turn_id,
-        invoice_id=invoice.id,
-        amount_minor=amount_minor,
-        currency=invoice.currency,
-        policy_document_key=rule.doc_key,
-        policy_version=rule.version,
-        cited_chunk_ids={"chunk_ids": cited_chunk_ids, "at": datetime.now(UTC).isoformat()},
+    # 4. Claim the intent, then move the money.
+    #
+    # The claim is an atomic INSERT ... ON CONFLICT DO NOTHING rather than an
+    # insert that might raise. That ordering is the whole point: a caller
+    # learns whether it won *before* touching the balance, so losing costs
+    # nothing and needs no recovery.
+    #
+    # The previous version inserted optimistically and caught IntegrityError.
+    # It read as reasonable and was not: once Postgres raises on a constraint,
+    # the transaction is aborted, and every statement after it fails --
+    # including the lookup meant to recover the winner's receipt. The loser
+    # therefore raised instead of recovering, in the one path idempotency
+    # exists for. A SAVEPOINT does not save it either; the flush failure still
+    # takes the surrounding transaction down.
+    #
+    # Not colliding is better than recovering from a collision.
+    claim = (
+        pg_insert(Refund)
+        .values(
+            intent_id=intent_id,
+            receipt_ref=_receipt_ref(),
+            session_id=session_id,
+            turn_id=turn_id,
+            invoice_id=invoice.id,
+            amount_minor=amount_minor,
+            currency=invoice.currency,
+            policy_document_key=rule.doc_key,
+            policy_version=rule.version,
+            cited_chunk_ids={"chunk_ids": cited_chunk_ids, "at": datetime.now(UTC).isoformat()},
+        )
+        .on_conflict_do_nothing(index_elements=["intent_id"])
+        .returning(Refund.id)
     )
-    db.add(receipt)
+    claimed_id = (await db.execute(claim)).scalar_one_or_none()
 
-    try:
-        await db.flush()
-    except IntegrityError:
-        # The genuine race: a concurrent caller committed this same intent
-        # between our lookup and our flush. The unique constraint is what makes
-        # double-spending impossible; recover the winner's receipt and report
-        # that, so both callers agree on one outcome.
-        await db.rollback()
+    if claimed_id is None:
+        # Someone else holds this intent. The balance is untouched, because it
+        # is only moved below, on the winning path.
         winner = await _find_existing(db, intent_id)
-        if winner is None:
-            raise
+        if winner is None:  # pragma: no cover - unique index guarantees one
+            raise ProviderUnavailable("That refund could not be confirmed. Please try again.")
         return await _receipt_from_row(db, winner, replay=True)
+
+    invoice.refunded_minor += amount_minor
+    await db.flush()
+
+    receipt = (await db.execute(select(Refund).where(Refund.id == claimed_id))).scalar_one()
 
     return RefundReceipt(
         receipt_ref=receipt.receipt_ref,
