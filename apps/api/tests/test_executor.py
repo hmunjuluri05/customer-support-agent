@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-import pytest_asyncio
 from sqlalchemy import func, select
 
 from support.contracts.enums import (
@@ -27,21 +26,9 @@ from support.contracts.enums import (
     ToolName,
     ToolStatus,
 )
-from support.providers.azure_openai import AzureOpenAIEmbeddings
 from support.storage.models import Invoice, Refund, ToolRun, Turn
 from support.storage.session import get_sessionmaker
 from support.tools.executor import ToolExecutor, TurnContext
-
-
-@pytest_asyncio.fixture(loop_scope="session")
-async def embeddings():
-    """Real embeddings: these are integration tests, and the calls are cheap.
-
-    Closed explicitly, since the credential owns an aiohttp session.
-    """
-    provider = AzureOpenAIEmbeddings()
-    yield provider
-    await provider.aclose()
 
 
 async def _make_turn(db, session_id) -> Turn:

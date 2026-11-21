@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-import pytest_asyncio
 from sqlalchemy import select
 
 from support.contracts.enums import (
@@ -30,17 +29,9 @@ from support.contracts.enums import (
     ToolName,
     ToolStatus,
 )
-from support.providers.azure_openai import AzureOpenAIEmbeddings
 from support.storage.models import EscalationTicket, Turn
 from support.storage.session import get_sessionmaker
 from support.tools.executor import ToolExecutor, TurnContext
-
-
-@pytest_asyncio.fixture(loop_scope="session")
-async def embeddings():
-    provider = AzureOpenAIEmbeddings()
-    yield provider
-    await provider.aclose()
 
 
 async def _ctx(db, session_id) -> TurnContext:
