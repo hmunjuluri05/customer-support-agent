@@ -53,7 +53,24 @@ export function DemoPanel({ armed, busy, onArm, onReset, resetNote }: Props) {
 
   return (
     <div className="rail-card">
-      <h2>
+      <h2>Sample data</h2>
+
+      {/* Outside the collapsible section on purpose: this is the control
+          someone reaches for between runs, and it was invisible behind a
+          "show" toggle labelled "Break something" -- a different concern
+          entirely. */}
+      <div className="row-gap">
+        <button type="button" className="btn small" disabled={busy} onClick={onReset}>
+          Reset sample data
+        </button>
+      </div>
+      <div className="hint">
+        Clears every conversation and restores the invoice balances. Accounts, invoices and the
+        policy corpus are untouched, and you stay signed in.
+      </div>
+      {resetNote !== null && <div className="hint">{resetNote}</div>}
+
+      <h2 style={{ marginTop: 18 }}>
         Break something
         <button
           type="button"
@@ -97,16 +114,11 @@ export function DemoPanel({ armed, busy, onArm, onReset, resetNote }: Props) {
             >
               Clear fault
             </button>
-            <button type="button" className="btn small" disabled={busy} onClick={onReset}>
-              Reset demo data
-            </button>
           </div>
 
           <div className="hint">
-            The fault applies to this session only, and stays armed until cleared. Resetting
-            restores the fixture balances and starts a new session.
+            The fault applies to this session only, and stays armed until cleared.
           </div>
-          {resetNote !== null && <div className="hint">{resetNote}</div>}
         </>
       )}
     </div>

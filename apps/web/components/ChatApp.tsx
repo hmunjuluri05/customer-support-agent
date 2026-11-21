@@ -444,7 +444,16 @@ export function ChatApp() {
     };
   }, []);
 
-  const newSession = useCallback(() => {
+  /**
+   * Leave the current session and go back to the picker.
+   *
+   * Leaving does not end anything: the session stays live and resumable, and
+   * the picker is re-queried on the way out so it is offered back. An earlier
+   * version cleared the list here, reasoning that asking for a new session
+   * answered the resume question -- which stranded the session you had just
+   * stepped out of, with no way to reach it from the UI.
+   */
+  const leaveSession = useCallback(() => {
     inFlight.current?.controller.abort();
     inFlight.current = null;
     void voice.current?.stop();
@@ -456,11 +465,9 @@ export function ChatApp() {
     setSessionMetrics(null);
     setInspecting(null);
     setTrace(null);
-    // Asking for a new session is an answer to the resume question, so do not
-    // then offer to resume the one just abandoned.
-    setResumable([]);
     dispatch({ kind: 'clear' });
     setPhase('picking');
+    void fetchResumable().then(setResumable);
   }, []);
 
   const turns = turnList(chat);
@@ -493,8 +500,13 @@ export function ChatApp() {
           </span>
         )}
         {credentials !== null && (
-          <button type="button" className="btn small" onClick={newSession}>
-            New session
+          <button
+            type="button"
+            className="btn small"
+            onClick={leaveSession}
+            title="Back to the sign-in screen. This session stays live and can be resumed."
+          >
+            Switch session
           </button>
         )}
       </header>
