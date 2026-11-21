@@ -18,8 +18,14 @@ Values are never printed: only a label, a length, and found/not-found. The
 files it reads to learn those values are precisely the ones git is told to
 ignore, so this needs no configuration and cannot itself leak anything.
 
-Exit status is 0 when nothing sensitive is recoverable and 1 otherwise, so it
-can gate a release if you want it to.
+A third pass asks the opposite question -- is anything that SHOULD be in the
+repository being hidden? A `.gitignore` inherited from a language template can
+silently swallow source: a bare `lib/` from the Python template took out
+apps/web/lib here, the push succeeded, and nothing local noticed because the
+files were sitting on disk the whole time.
+
+Exit status is 0 when nothing sensitive is recoverable and nothing source-like
+is hidden, 1 otherwise, so it can gate a release if you want it to.
 """
 
 from __future__ import annotations
@@ -48,6 +54,12 @@ NOT_SECRET_KEYS = {
     "AZURE_OPENAI_API_VERSION",
     "github_repository",
     "github_default_branch",
+    # Numeric GitHub ids. They live in tfvars because Terraform needs them,
+    # but they are public: `gh api repos/OWNER/REPO` returns both to anyone.
+    # Flagging them would train the reader to ignore this report, which is the
+    # failure mode that makes a scanner worse than none.
+    "github_owner_id",
+    "github_repository_id",
 }
 MIN_LEN = 8
 
@@ -152,6 +164,39 @@ ALLOWED = {
 }
 
 
+# Directories whose contents are source and must always be committed.
+SOURCE_ROOTS = [
+    "apps/api/support", "apps/api/tests", "apps/api/alembic",
+    "apps/web/app", "apps/web/lib", "apps/web/components",
+    "infra", "scripts", "fixtures", ".github",
+]
+SOURCE_SUFFIXES = {
+    ".py", ".ts", ".tsx", ".css", ".json", ".md", ".tf", ".ps1", ".mjs",
+    ".yml", ".yaml", ".sh", ".mako", ".ini", ".toml",
+}
+
+
+def hidden_source() -> list[tuple[str, str]]:
+    """Source files that exist on disk but git has been told to ignore."""
+    found: list[tuple[str, str]] = []
+    for root in SOURCE_ROOTS:
+        base = REPO / root
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*"):
+            if not path.is_file() or path.suffix not in SOURCE_SUFFIXES:
+                continue
+            rel = path.relative_to(REPO).as_posix()
+            check = subprocess.run(
+                ["git", "check-ignore", "-v", rel],
+                cwd=REPO, capture_output=True, text=True,
+            )
+            if check.returncode == 0:
+                rule = check.stdout.strip().split("	")[0]
+                found.append((rel, rule))
+    return found
+
+
 def main() -> int:
     known = candidates()
     blobs = all_blobs()
@@ -184,9 +229,20 @@ def main() -> int:
     if pattern_hits == 0:
         print("  ok    no secret-shaped content found")
 
-    print("\n" + ("RESULT: something sensitive is in the repository" if leaked
-                  else "RESULT: clean - no real secret is recoverable from any commit"))
-    return 1 if leaked else 0
+    hidden = hidden_source()
+    print("")
+    print("--- pass 3: source files .gitignore is hiding ---")
+    if hidden:
+        for path, rule in hidden:
+            print(f"  FAIL  {path}  <- {rule}")
+    else:
+        print("  ok    every source file under the tracked roots is visible to git")
+
+    bad = leaked or bool(hidden)
+    print("")
+    print(("RESULT: the repository is wrong - see above" if bad
+                  else "RESULT: clean - no secret is recoverable, no source is hidden"))
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":

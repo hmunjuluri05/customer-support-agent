@@ -28,7 +28,7 @@ locals {
   # Two subject formats, because GitHub changed the one it sends.
   #
   # The classic subject is `repo:owner/repo:ref:refs/heads/main`. GitHub now
-  # issues immutable identifiers instead -- `repo:owner@162727727/repo@1464260326:
+  # issues immutable identifiers instead -- `repo:owner@<owner-id>/repo@<repo-id>:
   # ref:refs/heads/main` -- and a credential written the classic way simply
   # does not match: Entra refuses with AADSTS700213 and the workflow fails at
   # `azure/login` with nothing wrong on the Azure side.

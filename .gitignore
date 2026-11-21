@@ -7,24 +7,41 @@ __pycache__/
 *.so
 
 # Distribution / packaging
+#
+# ANCHORED TO THE REPOSITORY ROOT on purpose. These come from GitHub's Python
+# template, where a bare `lib/` means "the build output of this one package".
+# In a polyglot repository it means "any directory called lib, anywhere" -- and
+# it silently swallowed apps/web/lib: the typed client, the event contract, the
+# SSE parser, the reducer and the voice session. The push succeeded, the repo
+# could not build, and nothing local noticed because the files were right there
+# on disk. CI caught it on the first run that compiled a clean checkout.
+#
+# A leading slash restricts each pattern to the repository root, which is what
+# they were always meant to mean. Python build output under apps/api is listed
+# separately below.
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
+/build/
+/develop-eggs/
+/dist/
+/downloads/
+/eggs/
+/.eggs/
+/lib/
+/lib64/
+/parts/
+/sdist/
+/var/
+/wheels/
+/share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-MANIFEST
+/MANIFEST
+
+# Python build output where the Python project actually lives.
+apps/api/build/
+apps/api/dist/
+apps/api/sdist/
 
 # PyInstaller
 #   Usually these files are written by a python script from a template
