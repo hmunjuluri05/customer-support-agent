@@ -33,6 +33,7 @@ import { AccountPicker } from './AccountPicker';
 import { Composer } from './Composer';
 import { DemoPanel } from './DemoPanel';
 import { SessionStats } from './SessionStats';
+import { SettingsMenu } from './SettingsMenu';
 import { TraceDrawer } from './TraceDrawer';
 import { TurnCard } from './TurnCard';
 import { VoicePanel } from './VoicePanel';
@@ -233,6 +234,7 @@ export function ChatApp() {
       dispatch({ kind: 'submit', clientTurnId, text, mode });
       setDraft('');
       setBanner(null);
+      setResetNote(null);
 
       const controller = new AbortController();
       inFlight.current = { controller, clientTurnId };
@@ -474,6 +476,7 @@ export function ChatApp() {
       await clearHistory(credentials);
       dispatch({ kind: 'clear' });
       setBanner(null);
+      setResetNote(null);
       void refreshMetrics(credentials);
     } catch (error) {
       setBanner(error instanceof Error ? error.message : String(error));
@@ -530,22 +533,19 @@ export function ChatApp() {
           <button
             type="button"
             className="btn small"
-            onClick={() => void clearChat()}
-            disabled={running}
-            title="Delete this conversation. Receipts and invoice balances are kept."
-          >
-            Clear chat
-          </button>
-        )}
-        {credentials !== null && (
-          <button
-            type="button"
-            className="btn small"
             onClick={leaveSession}
             title="Back to the sign-in screen. This session stays live and can be resumed."
           >
             Switch session
           </button>
+        )}
+        {credentials !== null && (
+          <SettingsMenu
+            demoMode={demoMode}
+            busy={running || demoBusy}
+            onClearChat={() => void clearChat()}
+            onResetDemo={() => void resetDemoData()}
+          />
         )}
       </header>
 
@@ -570,6 +570,10 @@ export function ChatApp() {
               <div className="transcript-inner">
                 {chat.history.length === 0 && turns.length === 0 && (
                   <div className="center-note">
+                    {/* The reset lives in a menu that closes behind it, so its
+                        confirmation goes where the effect is: the transcript it
+                        just emptied. */}
+                    {resetNote !== null && <div className="reset-note">{resetNote}</div>}
                     Ask for a refund, or ask what the policy says. Each tool call the agent makes
                     appears here as it runs.
                   </div>
@@ -685,8 +689,6 @@ export function ChatApp() {
                 armed={armedFault}
                 busy={demoBusy || running}
                 onArm={(fault) => void armFault(fault)}
-                onReset={() => void resetDemoData()}
-                resetNote={resetNote}
               />
             )}
 

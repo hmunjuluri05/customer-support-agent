@@ -36,41 +36,31 @@ interface Props {
   armed: FaultKind;
   busy: boolean;
   onArm: (fault: FaultKind) => void;
-  onReset: () => void;
-  resetNote: string | null;
 }
 
 /**
- * Demo controls.
+ * Fault injection.
  *
  * Faults are armed on the caller's own session, server-side — one visitor
  * cannot break another's demo. Each entry says what it will do, because a
  * control that produces an unexplained failure looks like a bug rather than a
  * demonstration.
+ *
+ * "Reset sample data" used to live here as well, and does not any more: it
+ * sits with "Clear chat" under the gear in the top bar. Arming a fault and
+ * putting everything back are not the same kind of act, and the one that wipes
+ * every conversation should not be a near-miss of the one that breaks a tool.
+ *
+ * The armed chip renders whether or not the list is expanded. A fault left on
+ * from an earlier run is the most confusing state this panel can produce, so
+ * it is never hidden behind the toggle.
  */
-export function DemoPanel({ armed, busy, onArm, onReset, resetNote }: Props) {
+export function DemoPanel({ armed, busy, onArm }: Props) {
   const [open, setOpen] = useState(false);
 
   return (
     <div className="rail-card">
-      <h2>Sample data</h2>
-
-      {/* Outside the collapsible section on purpose: this is the control
-          someone reaches for between runs, and it was invisible behind a
-          "show" toggle labelled "Break something" -- a different concern
-          entirely. */}
-      <div className="row-gap">
-        <button type="button" className="btn small" disabled={busy} onClick={onReset}>
-          Reset sample data
-        </button>
-      </div>
-      <div className="hint">
-        Clears every conversation and restores the invoice balances. Accounts, invoices and the
-        policy corpus are untouched, and you stay signed in.
-      </div>
-      {resetNote !== null && <div className="hint">{resetNote}</div>}
-
-      <h2 style={{ marginTop: 18 }}>
+      <h2>
         Break something
         <button
           type="button"

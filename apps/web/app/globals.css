@@ -1111,3 +1111,94 @@ button:disabled {
   border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
   border-radius: var(--radius);
 }
+
+/* ------------------------------------------------------- settings menu -- */
+
+.menu-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text-faint);
+}
+
+.icon-btn:hover:not(:disabled),
+.icon-btn.active {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 280px;
+  z-index: 50;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.45);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: none;
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+
+.menu-item:hover:not(:disabled) {
+  background: var(--panel);
+}
+
+.menu-item.danger .menu-label {
+  color: var(--bad);
+}
+
+.menu-item.danger:hover:not(:disabled) {
+  background: var(--bad-dim);
+}
+
+.menu-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.menu-hint {
+  display: block;
+  margin-top: 3px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-faint);
+  white-space: normal;
+}
+
+.menu-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 2px;
+}
+
+.reset-note {
+  margin-bottom: 10px;
+  color: var(--good);
+}
