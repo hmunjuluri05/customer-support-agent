@@ -459,3 +459,43 @@ async def test_the_last_reply_still_closes_the_turn(client: httpx.AsyncClient) -
         },
     )
     assert late.status_code == 409
+
+
+async def test_a_chain_split_across_turns_is_refused(client: httpx.AsyncClient) -> None:
+    """Why the browser must keep one spoken request on one turn.
+
+    Agent state is replayed from the tool_runs of a single turn, so a chain
+    that continues under a fresh client_turn_id starts again at INIT. The
+    server is right to refuse; this pins the contract the voice client relies
+    on, after a VAD boundary mid-chain rotated the turn and turned a valid
+    refund into "tool_not_allowed".
+    """
+    sid, headers = await start_session(client)
+
+    await voice_call(client, sid, headers, turn="v-split-a", name="verify_identity", call_id="a0")
+    await voice_call(
+        client,
+        sid,
+        headers,
+        turn="v-split-a",
+        name="retrieve_policy",
+        arguments={"topic": GOOD_TOPIC},
+        call_id="a1",
+    )
+
+    stranded = await voice_call(
+        client,
+        sid,
+        headers,
+        turn="v-split-b",
+        name="execute_mock_refund",
+        arguments={"invoice_ref": "INV-1001", "amount_minor": 1500, "reason": "duplicate charge"},
+        call_id="b0",
+    )
+    assert stranded["agent_state"] == AgentState.INIT.value
+    assert "not available yet" in stranded["output"]
+
+    async with get_sessionmaker()() as db:
+        assert (
+            await db.execute(select(Refund).where(Refund.session_id == UUID(sid)))
+        ).scalar_one_or_none() is None

@@ -120,6 +120,16 @@ export class VoiceSession {
   private closed = false;
   /** Serialises data-channel handling; see the onmessage wiring. */
   private events: Promise<void> = Promise.resolve();
+  /**
+   * A tool chain is part-way through on the current turn.
+   *
+   * The agent's state -- verified, evidence gathered -- is replayed server
+   * side from the tool_runs of one turn. Rotating the turn id mid-chain
+   * therefore resets it to INIT, which is how a perfectly good refund came
+   * back "tool_not_allowed". Set from the first tool call, cleared when a
+   * response completes without asking for another one.
+   */
+  private chainOpen = false;
 
   constructor(credentials: Credentials, callbacks: VoiceCallbacks) {
     this.credentials = credentials;
@@ -254,6 +264,9 @@ export class VoiceSession {
     // An in-flight reply that was never finished is still shown to the
     // customer, but recorded as interrupted so it is withheld from model
     // context later.
+    // The call is over, so whatever was open ends here: persisted as final
+    // even mid-chain, or the turn is left RUNNING with nothing to close it.
+    this.chainOpen = false;
     if (this.clientTurnId !== null && this.agentTranscript.trim().length > 0) {
       await this.persistTranscript('assistant', this.agentTranscript, true);
     }
@@ -399,10 +412,23 @@ export class VoiceSession {
   private async beginUserTurn(): Promise<void> {
     if (this.agentSpeaking) await this.finishAgentTurn(true);
 
+    // Speech detected while a chain is running is the customer talking over
+    // their own request -- a backchannel "yes please", or noise the VAD took
+    // for speech. It is not a new request, and starting a new turn for it
+    // throws away the verification and evidence the chain already earned.
+    // The turn ends when the agent stops calling tools, not when the VAD
+    // fires.
+    if (this.chainOpen && this.clientTurnId !== null) {
+      this.userTranscript = '';
+      if (!this.closed) this.callbacks.onStatus('listening');
+      return;
+    }
+
     // One resumption only. The adopted turn belongs to the request that was
     // interrupted; whatever the customer says after it is a new one.
     this.clientTurnId = this.resumeTurnId ?? `v-${crypto.randomUUID()}`;
     this.resumeTurnId = null;
+    this.chainOpen = false;
     this.userTranscript = '';
     this.agentTranscript = '';
     this.callbacks.onStatus('listening');
@@ -415,9 +441,13 @@ export class VoiceSession {
    */
   private async completeResponse(moreToCome: boolean): Promise<void> {
     if (!moreToCome) {
+      // A response that asked for nothing further is the end of the chain,
+      // and so of the turn.
+      this.chainOpen = false;
       await this.finishAgentTurn(false);
       return;
     }
+    this.chainOpen = true;
     // Spoken filler alongside a tool call is part of the transcript, but it
     // does not close the turn, so it is written with final: false.
     const turnAtStart = this.clientTurnId;
@@ -442,11 +472,14 @@ export class VoiceSession {
     const text = this.agentTranscript.trim();
     const clientTurnId = this.clientTurnId;
     this.agentSpeaking = false;
-    if (clientTurnId !== null && text.length > 0) {
-      await this.persistTranscript('assistant', text, interrupted);
-      this.callbacks.onTurnClosed(clientTurnId, interrupted);
-    }
     this.agentTranscript = '';
+    // Being cut off mid-chain records what was said without ending the turn:
+    // the tool chain it belongs to has not finished.
+    const final = !this.chainOpen;
+    if (clientTurnId !== null && text.length > 0) {
+      await this.persistTranscript('assistant', text, interrupted, final);
+      if (final) this.callbacks.onTurnClosed(clientTurnId, interrupted);
+    }
     if (!this.closed) this.callbacks.onStatus('listening');
   }
 
@@ -463,6 +496,8 @@ export class VoiceSession {
     if (this.clientTurnId === null) await this.beginUserTurn();
     const turnId = this.clientTurnId;
     if (turnId === null) return;
+    // From here the turn owns a chain, and must survive the VAD until it ends.
+    this.chainOpen = true;
 
     let output = 'The tool could not be run.';
     try {
