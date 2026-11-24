@@ -27,7 +27,8 @@
  */
 
 import type { Credentials } from './client';
-import type { StreamEvent } from './events';
+import type { StreamEvent, ToolName } from './events';
+import { TOOL_LABELS } from './format';
 import { toApiError } from './sse';
 
 export type VoiceStatus =
@@ -75,6 +76,26 @@ interface RealtimeServerEvent {
 
 const DATA_CHANNEL = 'oai-events';
 
+/** Did this response ask for a tool? Then the turn is not over. */
+function calledTool(event: RealtimeServerEvent): boolean {
+  const response = event.response;
+  if (typeof response !== 'object' || response === null) return false;
+  const output = (response as { output?: unknown }).output;
+  if (!Array.isArray(output)) return false;
+  return output.some(
+    (item) =>
+      typeof item === 'object' &&
+      item !== null &&
+      (item as { type?: unknown }).type === 'function_call',
+  );
+}
+
+/** The tool's UI label, or its raw name if the model invented one. */
+function toolLabel(name: string): string {
+  return name in TOOL_LABELS ? TOOL_LABELS[name as ToolName] : name;
+}
+
+
 export class VoiceSession {
   private readonly credentials: Credentials;
   private readonly callbacks: VoiceCallbacks;
@@ -97,6 +118,8 @@ export class VoiceSession {
   private agentTranscript = '';
   private agentSpeaking = false;
   private closed = false;
+  /** Serialises data-channel handling; see the onmessage wiring. */
+  private events: Promise<void> = Promise.resolve();
 
   constructor(credentials: Credentials, callbacks: VoiceCallbacks) {
     this.credentials = credentials;
@@ -157,7 +180,11 @@ export class VoiceSession {
     const channel = pc.createDataChannel(DATA_CHANNEL);
     this.channel = channel;
     channel.onmessage = (event) => {
-      void this.onServerEvent(event);
+      // Serialised, not fire-and-forget. Handlers await network calls, and
+      // `response.done` must not be processed while the tool call from that
+      // same response is still in flight -- the two interleaving is what made
+      // the turn-boundary logic below unpredictable.
+      this.events = this.events.then(() => this.onServerEvent(event)).catch(() => undefined);
     };
     channel.onopen = () => this.callbacks.onStatus('listening');
 
@@ -316,7 +343,11 @@ export class VoiceSession {
         break;
 
       case 'response.done':
-        await this.finishAgentTurn(false);
+        // A response that asked for a tool is not the end of the turn: its
+        // result goes back over the channel and the model answers again.
+        // Closing here made every multi-tool spoken turn fail its second
+        // tool call with "turn already finished".
+        await this.completeResponse(calledTool(event));
         break;
 
       case 'error': {
@@ -378,6 +409,26 @@ export class VoiceSession {
     this.callbacks.onTurnStarted(this.clientTurnId);
   }
 
+  /**
+   * One response finished. Whether the *turn* finished with it depends on
+   * whether the model asked for a tool.
+   */
+  private async completeResponse(moreToCome: boolean): Promise<void> {
+    if (!moreToCome) {
+      await this.finishAgentTurn(false);
+      return;
+    }
+    // Spoken filler alongside a tool call is part of the transcript, but it
+    // does not close the turn, so it is written with final: false.
+    const text = this.agentTranscript.trim();
+    this.agentSpeaking = false;
+    this.agentTranscript = '';
+    if (this.clientTurnId !== null && text.length > 0) {
+      await this.persistTranscript('assistant', text, false, false);
+    }
+    if (!this.closed) this.callbacks.onStatus('thinking');
+  }
+
   private async finishAgentTurn(interrupted: boolean): Promise<void> {
     const text = this.agentTranscript.trim();
     const clientTurnId = this.clientTurnId;
@@ -428,10 +479,11 @@ export class VoiceSession {
     } catch (error) {
       // The model is told plainly, so it can apologise or escalate rather
       // than stalling on a call that never comes back.
-      output = `The tool did not run: ${
-        error instanceof Error ? error.message : 'unknown error'
-      }. Tell the customer you could not complete that step.`;
-      this.callbacks.onError('A tool call could not be completed.');
+      const reason = error instanceof Error ? error.message : 'unknown error';
+      output = `The tool did not run: ${reason}. Tell the customer you could not complete that step.`;
+      // The reason used to go only to the model, leaving the UI with a
+      // sentence nobody could act on.
+      this.callbacks.onError(`${toolLabel(name)} could not be completed: ${reason}`);
     }
 
     this.send({
@@ -464,26 +516,40 @@ export class VoiceSession {
     role: 'user' | 'assistant',
     text: string,
     interrupted: boolean,
+    final = true,
   ): Promise<void> {
     if (this.clientTurnId === null) return;
     try {
-      await fetch(`/api/sessions/${this.credentials.sessionId}/voice/transcript`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...this.authHeaders(),
+      const response = await fetch(
+        `/api/sessions/${this.credentials.sessionId}/voice/transcript`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...this.authHeaders(),
+          },
+          credentials: 'include',
+          body: JSON.stringify({
+            client_turn_id: this.clientTurnId,
+            role,
+            text,
+            interrupted,
+            final,
+          }),
         },
-        credentials: 'include',
-        body: JSON.stringify({
-          client_turn_id: this.clientTurnId,
-          role,
-          text,
-          interrupted,
-        }),
-      });
-    } catch {
-      // The spoken exchange still happened; losing the written copy must not
-      // interrupt the call.
+      );
+      // `fetch` rejects only on a network failure, so a 4xx used to land in
+      // the empty catch below and vanish. A spoken turn that is not being
+      // recorded is worth saying out loud: it leaves no row, and with the
+      // access log off, no trace anywhere.
+      if (!response.ok) throw await toApiError(response);
+    } catch (error) {
+      // Still not fatal -- the call continues -- but no longer silent.
+      this.callbacks.onError(
+        `The spoken ${role === 'user' ? 'question' : 'reply'} was not saved to the transcript: ${
+          error instanceof Error ? error.message : 'unknown error'
+        }`,
+      );
     }
   }
 

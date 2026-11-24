@@ -19,6 +19,9 @@ enforcement.
 
 from __future__ import annotations
 
+import json
+from uuid import UUID
+
 import httpx
 from sqlalchemy import select
 
@@ -331,8 +334,11 @@ async def test_interrupted_reply_is_recorded_as_interrupted(client: httpx.AsyncC
     )
 
     async with get_sessionmaker()() as db:
+        # Scoped to this session. Matching on content alone searched every row
+        # in the database and failed against a shared one as soon as a second
+        # run had written the same sentence.
         message = (
-            await db.execute(select(Message).where(Message.content.like("Your refund%")))
+            await db.execute(select(Message).where(Message.session_id == UUID(sid)))
         ).scalar_one()
         assert message.interrupted is True
         assert message.mode is Mode.VOICE
@@ -351,3 +357,105 @@ async def test_assistant_transcript_closes_the_turn(client: httpx.AsyncClient) -
         turn = (await db.execute(select(Turn).where(Turn.client_turn_id == "v-close"))).scalar_one()
         assert turn.status is TurnStatus.FINISHED
         assert turn.finished_at is not None
+
+
+async def test_filler_speech_does_not_end_a_tool_chain(client: httpx.AsyncClient) -> None:
+    """The regression this was written for.
+
+    The realtime model speaks and calls a tool in the same response -- "let me
+    check that for you" arrives beside `verify_identity`. The browser wrote
+    that filler as an assistant transcript, the server read any assistant
+    transcript as the end of the exchange, and the next tool call in the same
+    turn came back 409. Every multi-tool spoken turn died on its second call.
+    """
+    sid, headers = await start_session(client)
+
+    await voice_call(client, sid, headers, turn="v-filler", name="verify_identity", call_id="c0")
+
+    filler = await client.post(
+        f"/api/sessions/{sid}/voice/transcript",
+        headers=headers,
+        json={
+            "client_turn_id": "v-filler",
+            "role": "assistant",
+            "text": "Let me check that for you.",
+            "final": False,
+        },
+    )
+    assert filler.status_code == 200, filler.text
+    assert filler.json()["state"] == "running"
+
+    # The chain continues: this is the call that used to 409.
+    second = await client.post(
+        f"/api/sessions/{sid}/voice/tool",
+        headers=headers,
+        json={
+            "client_turn_id": "v-filler",
+            "call_id": "c1",
+            "name": "retrieve_policy",
+            "arguments": json.dumps({"topic": GOOD_TOPIC}),
+        },
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["agent_state"] == "evidence_gathered"
+
+    async with get_sessionmaker()() as db:
+        turn = (
+            await db.execute(select(Turn).where(Turn.client_turn_id == "v-filler"))
+        ).scalar_one()
+        assert turn.status is TurnStatus.RUNNING
+        assert turn.finished_at is None
+
+
+async def test_filler_speech_is_still_recorded(client: httpx.AsyncClient) -> None:
+    """Not closing the turn must not mean dropping what was said."""
+    sid, headers = await start_session(client)
+    await client.post(
+        f"/api/sessions/{sid}/voice/transcript",
+        headers=headers,
+        json={
+            "client_turn_id": "v-keep",
+            "role": "assistant",
+            "text": "One moment while I look that up.",
+            "final": False,
+        },
+    )
+
+    snapshot = await client.get(f"/api/sessions/{sid}", headers=headers)
+    contents = [m["content"] for m in snapshot.json()["messages"]]
+    assert "One moment while I look that up." in contents
+
+
+async def test_the_last_reply_still_closes_the_turn(client: httpx.AsyncClient) -> None:
+    """final defaults to True, so a reply with no tool call ends the exchange."""
+    sid, headers = await start_session(client)
+    await voice_call(client, sid, headers, turn="v-last", name="verify_identity", call_id="c0")
+    await client.post(
+        f"/api/sessions/{sid}/voice/transcript",
+        headers=headers,
+        json={
+            "client_turn_id": "v-last",
+            "role": "assistant",
+            "text": "Let me check that.",
+            "final": False,
+        },
+    )
+    closing = await client.post(
+        f"/api/sessions/{sid}/voice/transcript",
+        headers=headers,
+        json={"client_turn_id": "v-last", "role": "assistant", "text": "That is all done."},
+    )
+    assert closing.json()["state"] == "finished"
+
+    # And a late call against a genuinely finished turn is still refused.
+    late = await client.post(
+        f"/api/sessions/{sid}/voice/tool",
+        headers=headers,
+        json={
+            "client_turn_id": "v-last",
+            "call_id": "c9",
+            "name": "retrieve_policy",
+            "arguments": json.dumps({"topic": GOOD_TOPIC}),
+        },
+    )
+    assert late.status_code == 409

@@ -121,6 +121,21 @@ class TranscriptRequest(BaseModel):
     role: MessageRole
     text: str = Field(min_length=1, max_length=8000)
     interrupted: bool = False
+    final: bool = True
+    """Does this reply end the turn?
+
+    The realtime model speaks between tool calls -- "let me check that for
+    you" arrives in the same response as `verify_identity`. That filler is
+    part of the transcript, but treating it as the end of the exchange closed
+    the turn while the chain was still running, and the next tool call came
+    back 409. The browser knows which responses carried a function call, so it
+    says so here.
+
+    It is not a trust boundary: holding a turn open buys nothing, because
+    `max_tool_calls_per_turn` is enforced in the executor against the audit
+    rows, not against the turn's status. Defaults to True so a caller that
+    says nothing gets the old, turn-ending behaviour.
+    """
 
 
 # ------------------------------------------------------------------ helpers --
@@ -690,8 +705,9 @@ async def save_transcript(
         )
     )
 
-    if body.role is MessageRole.ASSISTANT:
-        # The agent's reply closes the exchange.
+    if body.role is MessageRole.ASSISTANT and body.final:
+        # The agent's *last* reply closes the exchange. One that came alongside
+        # a function call does not -- see TranscriptRequest.final.
         turn.status = TurnStatus.FINISHED
         turn.finished_at = datetime.now(UTC)
         await _finalise_voice_turn(db, turn, settings=settings)
