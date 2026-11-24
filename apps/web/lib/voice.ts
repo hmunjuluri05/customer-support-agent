@@ -420,13 +420,22 @@ export class VoiceSession {
     }
     // Spoken filler alongside a tool call is part of the transcript, but it
     // does not close the turn, so it is written with final: false.
+    const turnAtStart = this.clientTurnId;
     const text = this.agentTranscript.trim();
     this.agentSpeaking = false;
     this.agentTranscript = '';
-    if (this.clientTurnId !== null && text.length > 0) {
+    if (turnAtStart !== null && text.length > 0) {
       await this.persistTranscript('assistant', text, false, false);
     }
-    if (!this.closed) this.callbacks.onStatus('thinking');
+    // The customer may have cut in while that was in flight, which starts a
+    // new turn and leaves the service generating against it. Asking for
+    // another response on top of that is the same collision by a different
+    // route.
+    if (this.closed || this.clientTurnId !== turnAtStart) return;
+    this.callbacks.onStatus('thinking');
+    // Exactly one continuation per response, however many tools it called.
+    // The model does not carry on by itself after a tool result.
+    this.send({ type: 'response.create' });
   }
 
   private async finishAgentTurn(interrupted: boolean): Promise<void> {
@@ -490,8 +499,11 @@ export class VoiceSession {
       type: 'conversation.item.create',
       item: { type: 'function_call_output', call_id: callId, output },
     });
-    // The model does not continue on its own after a tool result.
-    this.send({ type: 'response.create' });
+    // No `response.create` here. One response can carry several function
+    // calls, and asking for a new response per call made the second one fail
+    // with "conversation already has an active response". The request is sent
+    // once, from completeResponse, after `response.done` says the whole
+    // response -- and therefore every output it is waiting on -- is in.
   }
 
   /**
