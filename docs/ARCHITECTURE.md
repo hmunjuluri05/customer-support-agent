@@ -25,21 +25,30 @@ flowchart LR
     end
 
     pg[("PostgreSQL 17<br/>+ pgvector")]
-    aoai["Azure OpenAI<br/>chat · embeddings · realtime"]
     acr["Container Registry"]
+
+    subgraph aoai["Azure OpenAI"]
+        chat["<b>gpt-4.1-mini</b><br/>text turns: reasoning,<br/>tool choice, final reply<br/><i>deployment: gpt-chat</i>"]
+        embed["<b>text-embedding-3-small</b><br/>1536-dim vectors for<br/>corpus ingest and each query<br/><i>deployment: same name</i>"]
+        rt["<b>gpt-realtime-2.1-mini</b><br/>voice: speech to speech,<br/>transcripts, function calls<br/><i>deployment: gpt-realtime-mini</i>"]
+    end
 
     ui -->|"HTTPS"| web
     web -->|"streaming reverse proxy"| api
     api -->|"SQL"| pg
-    api -->|"managed identity"| aoai
+    api -->|"managed identity"| chat
+    api -->|"managed identity"| embed
+    api -.->|"session setup only:<br/>ephemeral key + SDP"| rt
     acr -.->|"image pull<br/>managed identity"| web
     acr -.->|"image pull"| api
-    ui <-->|"WebRTC audio, direct"| aoai
+    ui <-->|"WebRTC audio, direct"| rt
 
     style api fill:#1f2937,stroke:#60a5fa,color:#e5e7eb
     style web fill:#1f2937,stroke:#60a5fa,color:#e5e7eb
     style pg fill:#064e3b,stroke:#34d399,color:#e5e7eb
-    style aoai fill:#3b0764,stroke:#c084fc,color:#e5e7eb
+    style chat fill:#3b0764,stroke:#c084fc,color:#e5e7eb
+    style embed fill:#3b0764,stroke:#c084fc,color:#e5e7eb
+    style rt fill:#3b0764,stroke:#c084fc,color:#e5e7eb
 ```
 
 **The API is not publicly routable.** Its ingress is internal to the Container
@@ -51,6 +60,20 @@ internal hostname cannot leak to a browser.
 
 **Audio does not pass through the backend.** Only the WebRTC session setup
 does — see §5.
+
+**Voice replaces the text model rather than wrapping it.** `gpt-realtime-2.1-mini`
+is speech to speech: it consumes microphone audio and emits spoken audio,
+transcripts and function calls over one peer connection, so no text model is
+in the loop for a spoken turn. What does not change is where the tools run —
+a function call comes back through `/voice/tool` and into the same guarded
+executor as chat.
+
+**Code names deployments, not models.** The application only ever reads
+`AZURE_OPENAI_CHAT_DEPLOYMENT` and its two siblings. The model behind each one
+is a Terraform variable (`infra/variables.tf`), so an upgrade is a version bump
+in infrastructure with no application change — except for the embedding model,
+where `EMBEDDING_DIM = 1536` is asserted in the schema and a change in
+dimensionality fails at migration time instead of silently corrupting search.
 
 No provider key exists anywhere in configuration. Both containers authenticate
 to Azure OpenAI with a user-assigned managed identity.
